@@ -1,0 +1,43 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
+
+class ProfileController extends Controller
+{
+    public function update(Request $request)
+    {
+        $validated = $request->validate([
+            'name' => ['required', 'string', 'max:255'],
+            'hostel' => ['sometimes', 'string', 'max:255'],
+            'phone' => ['sometimes', 'string', 'max:255'],
+        ]);
+
+        $user = $request->user();
+        $user->update($validated);
+
+        return response()->json($user);
+    }
+
+    public function uploadCylinderImage(Request $request)
+    {
+        $validated = $request->validate([
+            'cylinder_image' => ['required', 'image', 'max:5120'],
+        ]);
+
+        $user = $request->user();
+        $oldImage = $user->cylinder_image;
+
+        $path = $request->file('cylinder_image')->store('cylinders/profile', 'public');
+
+        $user->update(['cylinder_image' => $path]);
+
+        if ($oldImage) {
+            Storage::disk('public')->delete($oldImage);
+        }
+
+        return response()->json($user);
+    }
+}

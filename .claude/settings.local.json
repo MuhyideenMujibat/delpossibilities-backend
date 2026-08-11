@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(php artisan *)",
+      "Bash(php -r \"echo extension_loaded\\('pdo_mysql'\\) ? 'pdo_mysql OK' : 'pdo_mysql MISSING';\")"
+    ]
+  }
+}

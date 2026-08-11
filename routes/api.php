@@ -1,0 +1,38 @@
+<?php
+
+use App\Http\Controllers\AuthController;
+use App\Http\Controllers\OrderController;
+use App\Http\Controllers\PasswordResetController;
+use App\Http\Controllers\ProfileController;
+use App\Http\Controllers\SettingController;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Route;
+
+Route::get('/user', function (Request $request) {
+    return $request->user();
+})->middleware('auth:sanctum');
+
+Route::post('/register', [AuthController::class, 'register']);
+Route::post('/login', [AuthController::class, 'login']);
+
+Route::post('/forgot-password', [PasswordResetController::class, 'forgotPassword']);
+Route::post('/reset-password', [PasswordResetController::class, 'resetPassword']);
+
+Route::middleware('auth:sanctum')->group(function () {
+    Route::post('/logout', [AuthController::class, 'logout']);
+
+    Route::post('/orders', [OrderController::class, 'store']);
+    Route::get('/my-orders', [OrderController::class, 'myOrders']);
+    Route::post('/orders/{order}/pay', [OrderController::class, 'pay']);
+    Route::patch('/profile', [ProfileController::class, 'update']);
+    Route::post('/profile/cylinder-image', [ProfileController::class, 'uploadCylinderImage']);
+
+    Route::middleware('admin')->group(function () {
+        Route::get('/orders', [OrderController::class, 'index']);
+        Route::patch('/orders/{order}/status', [OrderController::class, 'updateStatus']);
+
+        Route::get('/settings/price', [SettingController::class, 'showPrice']);
+        Route::patch('/settings/price', [SettingController::class, 'updatePrice']);
+    });
+});
+Route::post('/paystack/webhook', [App\Http\Controllers\PaystackWebhookController::class, 'handle']);
