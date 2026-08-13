@@ -2,14 +2,21 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\PendingRegistration;
 use App\Models\User;
+use App\Notifications\RegistrationOtpNotification;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Notification;
 use Illuminate\Validation\ValidationException;
 
 class AuthController extends Controller
 {
+    // Registration is staged, not saved: the details go into
+    // pending_registrations and only become a real `users` row once the
+    // emailed OTP is verified below. An abandoned signup never leaves an
+    // account behind.
     public function register(Request $request)
     {
         $validated = $request->validate([
@@ -20,14 +27,62 @@ class AuthController extends Controller
             'phone' => ['required', 'string', 'max:255'],
         ]);
 
-        $user = User::create([
-            'name' => $validated['name'],
-            'email' => $validated['email'],
-            'password' => Hash::make($validated['password']),
-            'hostel' => $validated['hostel'],
-            'phone' => $validated['phone'],
-            'role' => 'student',
+        $otp = (string) random_int(100000, 999999);
+
+        $pending = PendingRegistration::updateOrCreate(
+            ['email' => $validated['email']],
+            [
+                'name' => $validated['name'],
+                'password' => $validated['password'],
+                'hostel' => $validated['hostel'],
+                'phone' => $validated['phone'],
+                'otp_code' => $otp,
+                'otp_expires_at' => now()->addMinutes(10),
+            ]
+        );
+
+        Notification::route('mail', $pending->email)->notify(new RegistrationOtpNotification($otp));
+
+        return response()->json([
+            'message' => 'We sent a 6-digit code to your email. Enter it to finish creating your account.',
+            'email' => $pending->email,
         ]);
+    }
+
+    public function verifyRegistration(Request $request)
+    {
+        $validated = $request->validate([
+            'email' => ['required', 'string', 'email'],
+            'otp' => ['required', 'string'],
+        ]);
+
+        $pending = PendingRegistration::where('email', $validated['email'])->first();
+
+        if (! $pending || $pending->otp_expires_at->isPast() || ! Hash::check($validated['otp'], $pending->otp_code)) {
+            throw ValidationException::withMessages([
+                'otp' => ['That code is invalid or has expired. Please request a new one.'],
+            ]);
+        }
+
+        if (User::where('email', $pending->email)->exists()) {
+            $pending->delete();
+
+            throw ValidationException::withMessages([
+                'email' => ['An account with this email already exists. Please log in.'],
+            ]);
+        }
+
+        $user = User::create([
+            'name' => $pending->name,
+            'email' => $pending->email,
+            'password' => $pending->password,
+            'hostel' => $pending->hostel,
+            'phone' => $pending->phone,
+            'role' => 'student',
+            'email_verified_at' => now(),
+        ]);
+
+        $pending->delete();
 
         $token = $user->createToken('auth_token')->plainTextToken;
 
@@ -35,6 +90,33 @@ class AuthController extends Controller
             'user' => $user,
             'token' => $token,
         ], 201);
+    }
+
+    public function resendRegistrationOtp(Request $request)
+    {
+        $validated = $request->validate([
+            'email' => ['required', 'string', 'email'],
+        ]);
+
+        $pending = PendingRegistration::where('email', $validated['email'])->first();
+
+        if (! $pending) {
+            throw ValidationException::withMessages([
+                'email' => ['No pending registration found for this email. Please register again.'],
+            ]);
+        }
+
+        $otp = (string) random_int(100000, 999999);
+        $pending->update([
+            'otp_code' => $otp,
+            'otp_expires_at' => now()->addMinutes(10),
+        ]);
+
+        Notification::route('mail', $pending->email)->notify(new RegistrationOtpNotification($otp));
+
+        return response()->json([
+            'message' => 'A new code has been sent to your email.',
+        ]);
     }
 
     public function login(Request $request)

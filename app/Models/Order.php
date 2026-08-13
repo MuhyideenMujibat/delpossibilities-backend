@@ -16,11 +16,21 @@ class Order extends Model
         'cylinder_image',
         'kg',
         'price_per_kg',
+        'delivery_fee',
         'total_amount',
         'hostel_address',
         'status',
         'paystack_reference',
+        'payment_authorization_url',
+        'paid_at',
     ];
+
+    protected function casts(): array
+    {
+        return [
+            'paid_at' => 'datetime',
+        ];
+    }
 
     protected $appends = [
         'cylinder_image_url',

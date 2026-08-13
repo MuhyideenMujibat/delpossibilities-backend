@@ -61,7 +61,10 @@ class PaystackWebhookController extends Controller
 
     // Step 10: Everything checks out — approve the order
     if ($order->status === 'pending') {
-        $order->update(['status' => 'approved']);
+        $order->update([
+            'status' => 'approved',
+            'paid_at' => now(),
+        ]);
     }
 
     return response()->json(['status' => 'success']);

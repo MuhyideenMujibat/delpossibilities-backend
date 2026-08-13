@@ -6,7 +6,7 @@ use Closure;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
 
-class EnsureUserIsAdmin
+class EnsureUserIsSuperAdmin
 {
     /**
      * Handle an incoming request.
@@ -15,8 +15,8 @@ class EnsureUserIsAdmin
      */
     public function handle(Request $request, Closure $next): Response
     {
-        if (! in_array($request->user()?->role, ['admin', 'super_admin'], true)) {
-            abort(403, 'This action is unauthorized.');
+        if ($request->user()?->role !== 'super_admin') {
+            abort(403, 'Only a super admin can do this.');
         }
 
         return $next($request);

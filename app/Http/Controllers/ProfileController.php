@@ -21,6 +21,19 @@ class ProfileController extends Controller
         return response()->json($user);
     }
 
+    public function updatePassword(Request $request)
+    {
+        $validated = $request->validate([
+            'current_password' => ['required', 'current_password'],
+            'password' => ['required', 'string', 'min:8', 'confirmed'],
+        ]);
+
+        // The 'hashed' cast on User::password hashes this automatically.
+        $request->user()->update(['password' => $validated['password']]);
+
+        return response()->json(['message' => 'Password updated successfully.']);
+    }
+
     public function uploadCylinderImage(Request $request)
     {
         $validated = $request->validate([

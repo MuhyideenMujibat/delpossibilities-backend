@@ -23,13 +23,34 @@ class OrderController extends Controller
 
         $user = $request->user();
 
-        if (! $user->cylinder_image) {
+        if (! $user->cylinder_image && ! $request->hasFile('cylinder_image')) {
             throw ValidationException::withMessages([
-                'cylinder_image' => ['Please upload your cylinder image to your profile before placing an order.'],
+                'cylinder_image' => ['Please upload your cylinder image before placing an order.'],
             ]);
         }
 
-        $pricePerKg = Setting::current()->price_per_kg;
+        // Idempotency guard: a double-click or a retried request (e.g. a
+        // slow response the client times out on and resubmits) shouldn't
+        // create two identical orders. If the same user just created a
+        // matching pending order in the last 20 seconds, hand that back
+        // instead of creating a duplicate.
+        $duplicate = $user->orders()
+            ->where('status', 'pending')
+            ->where('kg', $validated['kg'])
+            ->where('hostel_address', $validated['hostel_address'])
+            ->where('created_at', '>=', now()->subSeconds(20))
+            ->latest()
+            ->first();
+
+        if ($duplicate) {
+            return response()->json($duplicate, 200);
+        }
+
+        $setting = Setting::current();
+        $pricePerKg = $setting->offer_active && $setting->offer_price_per_kg
+            ? $setting->offer_price_per_kg
+            : $setting->price_per_kg;
+        $deliveryFee = $setting->delivery_fee ?? 0;
 
         $imagePath = $request->hasFile('cylinder_image')
             ? $request->file('cylinder_image')->store('cylinders', 'public')
@@ -39,7 +60,8 @@ class OrderController extends Controller
             'cylinder_image' => $imagePath,
             'kg' => $validated['kg'],
             'price_per_kg' => $pricePerKg,
-            'total_amount' => round($validated['kg'] * $pricePerKg, 2),
+            'delivery_fee' => $deliveryFee,
+            'total_amount' => round($validated['kg'] * $pricePerKg + $deliveryFee, 2),
             'hostel_address' => $validated['hostel_address'],
             'status' => 'pending',
         ]);
@@ -75,6 +97,13 @@ class OrderController extends Controller
             ]);
         }
 
+        if ($order->paystack_reference && $order->payment_authorization_url) {
+            return response()->json([
+                'authorization_url' => $order->payment_authorization_url,
+                'reference' => $order->paystack_reference,
+            ]);
+        }
+
         $reference = 'order_'.$order->id.'_'.Str::random(10);
 
         try {
@@ -104,10 +133,82 @@ class OrderController extends Controller
             ], 500);
         }
 
-        $order->update(['paystack_reference' => $reference]);
+        $order->update([
+            'paystack_reference' => $reference,
+            'payment_authorization_url' => $response->json('data.authorization_url'),
+        ]);
 
         return response()->json([
             'authorization_url' => $response->json('data.authorization_url'),
+            'reference' => $reference,
+        ]);
+    }
+
+    // Paystack's webhook is the async, "belt and braces" confirmation path —
+    // but it requires Paystack's servers to reach ours, which only works
+    // once this app is deployed behind a public URL. This is the
+    // synchronous counterpart: right after Paystack redirects the student
+    // back, the frontend calls this so the backend asks Paystack directly
+    // whether the charge actually succeeded, rather than waiting on a
+    // webhook that may never arrive (e.g. in local development).
+    public function verifyPayment(Request $request, Order $order)
+    {
+        $user = $request->user();
+
+        if ($order->user_id !== $user->id) {
+            abort(403, 'This order does not belong to you.');
+        }
+
+        if ($order->status !== 'pending') {
+            return response()->json(['order' => $order, 'paystack_status' => 'success']);
+        }
+
+        if (! $order->paystack_reference) {
+            throw ValidationException::withMessages([
+                'status' => ['No payment has been started for this order yet.'],
+            ]);
+        }
+
+        try {
+            $response = Http::withToken(config('services.paystack.secret_key'))
+                ->get('https://api.paystack.co/transaction/verify/'.$order->paystack_reference);
+        } catch (\Illuminate\Http\Client\ConnectionException $e) {
+            Log::error('Paystack verify connection error: '.$e->getMessage());
+
+            return response()->json([
+                'message' => 'Unable to reach the payment provider. Please try again shortly.',
+            ], 500);
+        }
+
+        if (! $response->successful() || ! $response->json('status')) {
+            Log::error('Paystack verify transaction failed', [
+                'order_id' => $order->id,
+                'response' => $response->json(),
+            ]);
+
+            return response()->json([
+                'message' => 'Unable to verify this payment right now. Please try again shortly.',
+            ], 500);
+        }
+
+        $paystackStatus = $response->json('data.status');
+        $amountPaidInKobo = $response->json('data.amount');
+        $expectedAmountInKobo = (int) ($order->total_amount * 100);
+
+        if ($paystackStatus === 'success' && $amountPaidInKobo === $expectedAmountInKobo) {
+            $order->update(['status' => 'approved', 'paid_at' => now()]);
+        } elseif ($paystackStatus === 'success') {
+            // Paid, but not the right amount — don't silently approve it.
+            Log::warning('Paystack verify amount mismatch', [
+                'order_id' => $order->id,
+                'expected' => $expectedAmountInKobo,
+                'paid' => $amountPaidInKobo,
+            ]);
+        }
+
+        return response()->json([
+            'order' => $order->fresh(),
+            'paystack_status' => $paystackStatus,
         ]);
     }
 
@@ -116,6 +217,13 @@ class OrderController extends Controller
         $validated = $request->validate([
             'status' => ['required', Rule::in(['picked_up', 'delivered'])],
         ]);
+
+        // Idempotent no-op: a repeated confirm (double click, retried
+        // request) that lands after the first one already applied should
+        // just hand back the current order instead of writing again.
+        if ($order->status === $validated['status']) {
+            return response()->json($order);
+        }
 
         $order->update(['status' => $validated['status']]);
 
