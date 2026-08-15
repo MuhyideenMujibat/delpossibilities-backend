@@ -65,6 +65,7 @@ class PaystackWebhookController extends Controller
             'status' => 'approved',
             'paid_at' => now(),
         ]);
+        $order->notifyStatusChange();
     }
 
     return response()->json(['status' => 'success']);

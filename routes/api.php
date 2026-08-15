@@ -1,9 +1,11 @@
 <?php
 
+use App\Http\Controllers\AdminHostelController;
 use App\Http\Controllers\AdminStaffController;
 use App\Http\Controllers\AdminStudentController;
 use App\Http\Controllers\AdminUserController;
 use App\Http\Controllers\AuthController;
+use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\OrderController;
 use App\Http\Controllers\PasswordResetController;
 use App\Http\Controllers\PermissionController;
@@ -30,6 +32,15 @@ Route::post('/reset-password', [PasswordResetController::class, 'resetPassword']
 // below, which also allows PATCH.
 Route::get('/price', [SettingController::class, 'showPrice']);
 
+// Public, read-only hostel list so Register (unauthenticated) can offer the
+// same picker as the logged-in Profile/Create Order pages. Admin-only
+// create/update/delete lives under the super_admin group below.
+Route::get('/hostels', function () {
+    return response()->json(
+        \App\Models\Hostel::where('is_active', true)->orderBy('name')->get(['id', 'name'])
+    );
+});
+
 Route::middleware('auth:sanctum')->group(function () {
     Route::post('/logout', [AuthController::class, 'logout']);
 
@@ -40,6 +51,10 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::patch('/profile', [ProfileController::class, 'update']);
     Route::patch('/profile/password', [ProfileController::class, 'updatePassword']);
     Route::post('/profile/cylinder-image', [ProfileController::class, 'uploadCylinderImage']);
+
+    Route::get('/notifications', [NotificationController::class, 'index']);
+    Route::patch('/notifications/{notification}/read', [NotificationController::class, 'markRead']);
+    Route::post('/notifications/read-all', [NotificationController::class, 'markAllRead']);
 
     Route::middleware('admin')->group(function () {
         // Shared by three different admin "lenses" on the same order data
@@ -83,6 +98,11 @@ Route::middleware('auth:sanctum')->group(function () {
             Route::post('/admin/user-types', [UserTypeController::class, 'store']);
             Route::patch('/admin/user-types/{userType}', [UserTypeController::class, 'update']);
             Route::delete('/admin/user-types/{userType}', [UserTypeController::class, 'destroy']);
+
+            Route::get('/admin/hostels', [AdminHostelController::class, 'index']);
+            Route::post('/admin/hostels', [AdminHostelController::class, 'store']);
+            Route::patch('/admin/hostels/{hostel}', [AdminHostelController::class, 'update']);
+            Route::delete('/admin/hostels/{hostel}', [AdminHostelController::class, 'destroy']);
         });
     });
 });

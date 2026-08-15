@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\Rule;
 
 class ProfileController extends Controller
 {
@@ -11,7 +12,7 @@ class ProfileController extends Controller
     {
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:255'],
-            'hostel' => ['sometimes', 'string', 'max:255'],
+            'hostel' => ['sometimes', 'string', 'max:255', Rule::exists('hostels', 'name')->where('is_active', true)],
             'phone' => ['sometimes', 'string', 'max:255'],
         ]);
 

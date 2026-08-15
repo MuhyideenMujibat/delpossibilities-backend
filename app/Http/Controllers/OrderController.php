@@ -197,6 +197,7 @@ class OrderController extends Controller
 
         if ($paystackStatus === 'success' && $amountPaidInKobo === $expectedAmountInKobo) {
             $order->update(['status' => 'approved', 'paid_at' => now()]);
+            $order->notifyStatusChange();
         } elseif ($paystackStatus === 'success') {
             // Paid, but not the right amount — don't silently approve it.
             Log::warning('Paystack verify amount mismatch', [
@@ -226,6 +227,7 @@ class OrderController extends Controller
         }
 
         $order->update(['status' => $validated['status']]);
+        $order->notifyStatusChange();
 
         return response()->json($order);
     }
