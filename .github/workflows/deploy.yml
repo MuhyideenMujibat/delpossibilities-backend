@@ -1,0 +1,129 @@
+name: Deploy to cPanel
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          tools: composer
+
+      - name: Install sshpass
+        run: |
+          if ! command -v sshpass >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends sshpass
+          fi
+
+      - name: Package and sync changed files to cPanel
+        env:
+          SSHPASS: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          tar czf /tmp/deploy.tar.gz \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='node_modules' \
+            --exclude='vendor' \
+            --exclude='tests' \
+            --exclude='public' \
+            --exclude='.env' \
+            --exclude='phpunit.xml' \
+            --exclude='storage/logs' \
+            --exclude='storage/framework/sessions' \
+            --exclude='storage/framework/views' \
+            --exclude='storage/framework/cache/data' \
+            --exclude='bootstrap/cache/*.php' \
+            .
+
+          for attempt in 1 2 3; do
+            sshpass -e scp -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ConnectionAttempts=2 -P 22 \
+              /tmp/deploy.tar.gz ${{ secrets.SSH_USERNAME }}@${{ secrets.SSH_HOST }}:${{ secrets.APP_PATH }}/deploy.tar.gz \
+            && sshpass -e ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ConnectionAttempts=2 -p 22 \
+              ${{ secrets.SSH_USERNAME }}@${{ secrets.SSH_HOST }} \
+              "cd ${{ secrets.APP_PATH }} && tar xzf deploy.tar.gz && rm -f deploy.tar.gz" \
+            && break
+
+            if [ "$attempt" = "3" ]; then
+              exit 1
+            fi
+
+            echo "SSH connection failed, retrying in 20 seconds..."
+            sleep 20
+          done
+
+      - name: Sync public assets to domain root
+        env:
+          SSHPASS: ${{ secrets.SSH_PASSWORD }}
+        run: |
+          DOC_ROOT=$(dirname "${{ secrets.APP_PATH }}")
+          APP_DIR_NAME=$(basename "${{ secrets.APP_PATH }}")
+
+          (cd public && tar czf /tmp/public-assets.tar.gz \
+            --exclude='storage' \
+            --exclude='index.php' \
+            --exclude='.htaccess' \
+            .)
+
+          # index.php normally sits one level below vendor/bootstrap (in public/);
+          # here it's deployed as a sibling of the app folder, so point it inside instead.
+          sed "s#__DIR__\.'/\.\./#__DIR__.'/${APP_DIR_NAME}/#g" public/index.php > /tmp/index.php
+
+          for attempt in 1 2 3; do
+            sshpass -e scp -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ConnectionAttempts=2 -P 22 \
+              /tmp/public-assets.tar.gz /tmp/index.php \
+              ${{ secrets.SSH_USERNAME }}@${{ secrets.SSH_HOST }}:$DOC_ROOT/ \
+            && sshpass -e ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ConnectionAttempts=2 -p 22 \
+              ${{ secrets.SSH_USERNAME }}@${{ secrets.SSH_HOST }} \
+              "cd $DOC_ROOT && tar xzf public-assets.tar.gz && rm -f public-assets.tar.gz && ln -sfn ${APP_DIR_NAME}/storage/app/public storage" \
+            && break
+
+            if [ "$attempt" = "3" ]; then
+              exit 1
+            fi
+
+            echo "SSH connection failed, retrying in 20 seconds..."
+            sleep 20
+          done
+
+      - name: Run Laravel Commands via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USERNAME }}
+          password: ${{ secrets.SSH_PASSWORD }}
+          port: 22
+          script: |
+            cd ${{ secrets.APP_PATH }}
+            # Shared hosting defaults PHP CLI to a 128M memory_limit, which isn't enough
+            # for composer's package:discover hook and has silently SIGKILL'd deploys
+            # before (exit 137, no PHP error since the OS killed it, not PHP itself).
+            mkdir -p ~/.phprc_override
+            printf "memory_limit = 512M\n" > ~/.phprc_override/php.ini
+            export PHPRC=~/.phprc_override
+            export COMPOSER_MEMORY_LIMIT=-1
+            if ! command -v composer >/dev/null 2>&1; then
+              if [ ! -f composer.phar ]; then
+                curl -sSL -o composer-setup.php https://getcomposer.org/installer
+                php -d allow_url_fopen=1 composer-setup.php --quiet
+                rm -f composer-setup.php
+              fi
+              COMPOSER="php composer.phar"
+            else
+              COMPOSER="composer"
+            fi
+            $COMPOSER install --no-dev --optimize-autoloader --no-interaction --prefer-dist
+            php -d memory_limit=512M artisan config:clear
+            php -d memory_limit=512M artisan route:clear
+            php -d memory_limit=512M artisan config:cache
+            php -d memory_limit=512M artisan migrate --force
