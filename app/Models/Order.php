@@ -67,7 +67,7 @@ class Order extends Model
         $this->notifications()->create([
             'user_id' => $this->user_id,
             'title' => $message['title'],
-            'body' => "Your order #{$this->id} ({$this->kg} kg) {$message['body']}",
+            'body' => "Your order #{$this->total_amount} ({$this->kg} kg) {$message['body']}",
         ]);
     }
 
