@@ -19,16 +19,13 @@ jobs:
           php-version: '8.2'
           tools: composer
 
-      - name: Install sshpass
+      - name: Set up SSH key
         run: |
-          if ! command -v sshpass >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends sshpass
-          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
 
       - name: Package and sync changed files to cPanel
-        env:
-          SSHPASS: ${{ secrets.SSH_PASSWORD }}
         run: |
           tar czf /tmp/deploy.tar.gz \
             --exclude='.git' \
@@ -47,9 +44,9 @@ jobs:
             .
 
           for attempt in 1 2 3; do
-            sshpass -e scp -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ConnectionAttempts=2 -P 22 \
+            scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ConnectionAttempts=2 -P ${{ secrets.SSH_PORT || 22 }} \
               /tmp/deploy.tar.gz ${{ secrets.SSH_USERNAME }}@${{ secrets.SSH_HOST }}:${{ secrets.APP_PATH }}/deploy.tar.gz \
-            && sshpass -e ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ConnectionAttempts=2 -p 22 \
+            && ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ConnectionAttempts=2 -p ${{ secrets.SSH_PORT || 22 }} \
               ${{ secrets.SSH_USERNAME }}@${{ secrets.SSH_HOST }} \
               "cd ${{ secrets.APP_PATH }} && tar xzf deploy.tar.gz && rm -f deploy.tar.gz" \
             && break
@@ -63,8 +60,6 @@ jobs:
           done
 
       - name: Sync public assets to domain root
-        env:
-          SSHPASS: ${{ secrets.SSH_PASSWORD }}
         run: |
           DOC_ROOT=$(dirname "${{ secrets.APP_PATH }}")
           APP_DIR_NAME=$(basename "${{ secrets.APP_PATH }}")
@@ -80,10 +75,10 @@ jobs:
           sed "s#__DIR__\.'/\.\./#__DIR__.'/${APP_DIR_NAME}/#g" public/index.php > /tmp/index.php
 
           for attempt in 1 2 3; do
-            sshpass -e scp -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ConnectionAttempts=2 -P 22 \
+            scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ConnectionAttempts=2 -P ${{ secrets.SSH_PORT || 22 }} \
               /tmp/public-assets.tar.gz /tmp/index.php \
               ${{ secrets.SSH_USERNAME }}@${{ secrets.SSH_HOST }}:$DOC_ROOT/ \
-            && sshpass -e ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ConnectionAttempts=2 -p 22 \
+            && ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o ConnectionAttempts=2 -p ${{ secrets.SSH_PORT || 22 }} \
               ${{ secrets.SSH_USERNAME }}@${{ secrets.SSH_HOST }} \
               "cd $DOC_ROOT && tar xzf public-assets.tar.gz && rm -f public-assets.tar.gz && ln -sfn ${APP_DIR_NAME}/storage/app/public storage" \
             && break
@@ -101,8 +96,8 @@ jobs:
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USERNAME }}
-          password: ${{ secrets.SSH_PASSWORD }}
-          port: 22
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
           script: |
             cd ${{ secrets.APP_PATH }}
             # Shared hosting defaults PHP CLI to a 128M memory_limit, which isn't enough
