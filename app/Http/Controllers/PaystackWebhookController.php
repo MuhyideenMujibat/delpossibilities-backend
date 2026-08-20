@@ -66,6 +66,8 @@ class PaystackWebhookController extends Controller
             'paid_at' => now(),
         ]);
         $order->notifyStatusChange();
+        $order->applyLoyaltyProgress();
+        $order->sendReceiptEmail();
     }
 
     return response()->json(['status' => 'success']);

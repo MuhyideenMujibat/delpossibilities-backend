@@ -11,6 +11,7 @@ class PendingRegistration extends Model
         'email',
         'password',
         'hostel',
+        'location_type',
         'phone',
         'otp_code',
         'otp_expires_at',

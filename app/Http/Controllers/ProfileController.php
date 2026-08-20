@@ -10,11 +10,19 @@ class ProfileController extends Controller
 {
     public function update(Request $request)
     {
-        $validated = $request->validate([
+        $rules = [
             'name' => ['required', 'string', 'max:255'],
-            'hostel' => ['sometimes', 'string', 'max:255', Rule::exists('hostels', 'name')->where('is_active', true)],
+            'location_type' => ['sometimes', Rule::in(['hostel', 'off_campus'])],
+            'hostel' => ['sometimes', 'string', 'max:255'],
             'phone' => ['sometimes', 'string', 'max:255'],
-        ]);
+        ];
+
+        $locationType = $request->input('location_type', $request->user()->location_type);
+        if ($request->filled('hostel') && $locationType === 'hostel') {
+            $rules['hostel'][] = Rule::exists('hostels', 'name')->where('is_active', true);
+        }
+
+        $validated = $request->validate($rules);
 
         $user = $request->user();
         $user->update($validated);

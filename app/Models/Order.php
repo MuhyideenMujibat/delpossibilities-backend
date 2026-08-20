@@ -2,9 +2,12 @@
 
 namespace App\Models;
 
+use App\Mail\OrderReceiptMail;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Storage;
 
 class Order extends Model
@@ -16,9 +19,12 @@ class Order extends Model
         'cylinder_image',
         'kg',
         'price_per_kg',
+        'loyalty_discount_applied',
+        'loyalty_discount_amount',
         'delivery_fee',
         'total_amount',
         'hostel_address',
+        'location_type',
         'status',
         'paystack_reference',
         'payment_authorization_url',
@@ -29,6 +35,8 @@ class Order extends Model
     {
         return [
             'paid_at' => 'datetime',
+            'loyalty_discount_applied' => 'boolean',
+            'loyalty_discount_amount' => 'decimal:2',
         ];
     }
 
@@ -71,6 +79,24 @@ class Order extends Model
         ]);
     }
 
+    // Best-effort: a failed send (bad SMTP creds, provider hiccup, etc.)
+    // shouldn't roll back or fail the payment confirmation that triggered it.
+    public function sendReceiptEmail(): void
+    {
+        if (! $this->user?->email) {
+            return;
+        }
+
+        try {
+            Mail::to($this->user->email)->send(new OrderReceiptMail($this));
+        } catch (\Throwable $e) {
+            Log::error('Failed to send order receipt email', [
+                'order_id' => $this->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
     protected function cylinderImageUrl(): Attribute
     {
         return Attribute::make(
@@ -85,5 +111,24 @@ class Order extends Model
                 return $disk->url($this->cylinder_image);
             },
         );
+    }
+
+    // Called once this order is confirmed paid. If it redeemed an earned
+    // loyalty reward, the student's running total resets so they start
+    // building toward the next one; otherwise this order's kg counts
+    // toward their next reward.
+    public function applyLoyaltyProgress(): void
+    {
+        $user = $this->user;
+
+        if (! $user) {
+            return;
+        }
+
+        $user->loyalty_progress_kg = $this->loyalty_discount_applied
+            ? 0
+            : (float) $user->loyalty_progress_kg + (float) $this->kg;
+
+        $user->save();
     }
 }

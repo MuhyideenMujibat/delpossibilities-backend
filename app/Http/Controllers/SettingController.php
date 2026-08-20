@@ -19,20 +19,28 @@ class SettingController extends Controller
         $validated = $request->validate([
             'price_per_kg' => ['required', 'numeric', 'min:0'],
             'delivery_fee' => ['sometimes', 'numeric', 'min:0'],
+            'off_campus_delivery_fee' => ['sometimes', 'numeric', 'min:0'],
             'offer_active' => ['sometimes', 'boolean'],
             'offer_title' => ['nullable', 'string', 'max:120'],
             'offer_message' => ['nullable', 'string', 'max:1000'],
             'offer_price_per_kg' => ['nullable', 'numeric', 'min:0'],
+            'loyalty_enabled' => ['sometimes', 'boolean'],
+            'loyalty_threshold_kg' => ['nullable', 'numeric', 'min:0.01'],
+            'loyalty_discount_percent' => ['nullable', 'numeric', 'min:0.01', 'max:100'],
         ]);
 
         $setting = Setting::current();
         $setting->update([
             'price_per_kg' => $validated['price_per_kg'],
             'delivery_fee' => $validated['delivery_fee'] ?? 0,
+            'off_campus_delivery_fee' => $validated['off_campus_delivery_fee'] ?? 0,
             'offer_active' => $validated['offer_active'] ?? false,
             'offer_title' => $validated['offer_title'] ?? null,
             'offer_message' => $validated['offer_message'] ?? null,
             'offer_price_per_kg' => $validated['offer_price_per_kg'] ?? null,
+            'loyalty_enabled' => $validated['loyalty_enabled'] ?? false,
+            'loyalty_threshold_kg' => $validated['loyalty_threshold_kg'] ?? null,
+            'loyalty_discount_percent' => $validated['loyalty_discount_percent'] ?? null,
         ]);
 
         return response()->json($setting);

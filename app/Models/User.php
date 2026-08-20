@@ -29,6 +29,7 @@ class User extends Authenticatable
         'role',
         'user_type_id',
         'hostel',
+        'location_type',
         'phone',
         'cylinder_image',
         'email_verified_at',
@@ -37,6 +38,8 @@ class User extends Authenticatable
     protected $appends = [
         'cylinder_image_url',
         'permission_keys',
+        'loyalty_reward_available',
+        'loyalty_kg_to_next_reward',
     ];
 
     /**
@@ -59,6 +62,7 @@ class User extends Authenticatable
         return [
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
+            'loyalty_progress_kg' => 'decimal:2',
         ];
     }
 
@@ -89,6 +93,43 @@ class User extends Authenticatable
     {
         return Attribute::make(
             get: fn () => $this->cylinder_image ? Storage::disk('public')->url($this->cylinder_image) : null,
+        );
+    }
+
+    // True once this student's running kg total (since their last redeemed
+    // reward) has reached the admin-configured threshold — their next order
+    // will automatically get the loyalty discount applied.
+    protected function loyaltyRewardAvailable(): Attribute
+    {
+        return Attribute::make(
+            get: function () {
+                $setting = Setting::current();
+
+                if (! $setting->loyalty_enabled || ! $setting->loyalty_threshold_kg) {
+                    return false;
+                }
+
+                return (float) $this->loyalty_progress_kg >= (float) $setting->loyalty_threshold_kg;
+            },
+        );
+    }
+
+    // How many more kg this student needs to buy before unlocking the next
+    // loyalty discount. Null when the program is off or already unlocked.
+    protected function loyaltyKgToNextReward(): Attribute
+    {
+        return Attribute::make(
+            get: function () {
+                $setting = Setting::current();
+
+                if (! $setting->loyalty_enabled || ! $setting->loyalty_threshold_kg) {
+                    return null;
+                }
+
+                $remaining = (float) $setting->loyalty_threshold_kg - (float) $this->loyalty_progress_kg;
+
+                return $remaining > 0 ? round($remaining, 2) : 0;
+            },
         );
     }
 

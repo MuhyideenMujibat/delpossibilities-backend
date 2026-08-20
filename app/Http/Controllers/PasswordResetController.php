@@ -8,6 +8,7 @@ use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 
 class PasswordResetController extends Controller
@@ -17,26 +18,24 @@ class PasswordResetController extends Controller
     public function forgotPassword(Request $request)
     {
         $request->validate([
-            'email' => ['required', 'string', 'email'],
+            'email' => ['required', 'string', 'email', Rule::exists('users', 'email')],
+        ], [
+            'email.exists' => 'We could not find an account with that email.',
         ]);
 
         $user = User::where('email', $request->email)->first();
 
-        // Deliberately vague either way, so this endpoint can't be used to
-        // probe which emails have accounts.
-        if ($user) {
-            $otp = (string) random_int(100000, 999999);
+        $otp = (string) random_int(100000, 999999);
 
-            DB::table('password_reset_tokens')->updateOrInsert(
-                ['email' => $user->email],
-                ['token' => Hash::make($otp), 'created_at' => now()]
-            );
+        DB::table('password_reset_tokens')->updateOrInsert(
+            ['email' => $user->email],
+            ['token' => Hash::make($otp), 'created_at' => now()]
+        );
 
-            $user->notify(new PasswordResetOtpNotification($otp));
-        }
+        $user->notify(new PasswordResetOtpNotification($otp));
 
         return response()->json([
-            'message' => 'If an account exists for that email, a 6-digit code has been sent.',
+            'message' => 'A 6-digit code has been sent to your email.',
         ]);
     }
 

@@ -20,13 +20,23 @@ class AuthController extends Controller
     // account behind.
     public function register(Request $request)
     {
-        $validated = $request->validate([
+        $rules = [
             'name' => ['required', 'string', 'max:255'],
             'email' => ['required', 'string', 'email', 'max:255', 'unique:users,email'],
             'password' => ['required', 'string', 'min:8'],
-            'hostel' => ['required', 'string', 'max:255', Rule::exists('hostels', 'name')->where('is_active', true)],
+            'location_type' => ['required', Rule::in(['hostel', 'off_campus'])],
+            // 'hostel' doubles as the free-text delivery address for
+            // off-campus students — only on-campus values are checked
+            // against the admin-managed hostel list.
+            'hostel' => ['required', 'string', 'max:255'],
             'phone' => ['required', 'string', 'max:255'],
-        ]);
+        ];
+
+        if ($request->input('location_type') === 'hostel') {
+            $rules['hostel'][] = Rule::exists('hostels', 'name')->where('is_active', true);
+        }
+
+        $validated = $request->validate($rules);
 
         $otp = (string) random_int(100000, 999999);
 
@@ -36,6 +46,7 @@ class AuthController extends Controller
                 'name' => $validated['name'],
                 'password' => $validated['password'],
                 'hostel' => $validated['hostel'],
+                'location_type' => $validated['location_type'],
                 'phone' => $validated['phone'],
                 'otp_code' => $otp,
                 'otp_expires_at' => now()->addMinutes(10),
@@ -78,6 +89,7 @@ class AuthController extends Controller
             'email' => $pending->email,
             'password' => $pending->password,
             'hostel' => $pending->hostel,
+            'location_type' => $pending->location_type,
             'phone' => $pending->phone,
             'role' => 'student',
             'email_verified_at' => now(),

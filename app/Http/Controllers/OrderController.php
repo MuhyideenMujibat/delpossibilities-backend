@@ -17,6 +17,7 @@ class OrderController extends Controller
     {
         $validated = $request->validate([
             'kg' => ['required', 'numeric', 'min:0.01'],
+            'location_type' => ['required', Rule::in(['hostel', 'off_campus'])],
             'hostel_address' => ['required', 'string', 'max:255'],
             'cylinder_image' => ['nullable', 'image', 'max:5120'],
         ]);
@@ -50,7 +51,28 @@ class OrderController extends Controller
         $pricePerKg = $setting->offer_active && $setting->offer_price_per_kg
             ? $setting->offer_price_per_kg
             : $setting->price_per_kg;
-        $deliveryFee = $setting->delivery_fee ?? 0;
+        $deliveryFee = $validated['location_type'] === 'off_campus'
+            ? ($setting->off_campus_delivery_fee ?? 0)
+            : ($setting->delivery_fee ?? 0);
+
+        // A student's running kg total (Order::applyLoyaltyProgress) reaching
+        // the admin's threshold unlocks a discount that auto-applies here, on
+        // their next order — after which their total resets to 0 so they
+        // start building toward the next reward. price_per_kg stays the
+        // normal/offer rate; the discount is its own line item subtracted
+        // from the total, so "gas cost" on receipts always reads honestly.
+        $loyaltyDiscountApplied = false;
+        $loyaltyDiscountAmount = null;
+
+        if (
+            $setting->loyalty_enabled
+            && $setting->loyalty_threshold_kg
+            && $setting->loyalty_discount_percent
+            && (float) $user->loyalty_progress_kg >= (float) $setting->loyalty_threshold_kg
+        ) {
+            $loyaltyDiscountAmount = round($pricePerKg * $validated['kg'] * ($setting->loyalty_discount_percent / 100), 2);
+            $loyaltyDiscountApplied = true;
+        }
 
         $imagePath = $request->hasFile('cylinder_image')
             ? $request->file('cylinder_image')->store('cylinders', 'public')
@@ -60,9 +82,12 @@ class OrderController extends Controller
             'cylinder_image' => $imagePath,
             'kg' => $validated['kg'],
             'price_per_kg' => $pricePerKg,
+            'loyalty_discount_applied' => $loyaltyDiscountApplied,
+            'loyalty_discount_amount' => $loyaltyDiscountAmount,
             'delivery_fee' => $deliveryFee,
-            'total_amount' => round($validated['kg'] * $pricePerKg + $deliveryFee, 2),
+            'total_amount' => round($validated['kg'] * $pricePerKg - ($loyaltyDiscountAmount ?? 0) + $deliveryFee, 2),
             'hostel_address' => $validated['hostel_address'],
+            'location_type' => $validated['location_type'],
             'status' => 'pending',
         ]);
 
@@ -198,6 +223,8 @@ class OrderController extends Controller
         if ($paystackStatus === 'success' && $amountPaidInKobo === $expectedAmountInKobo) {
             $order->update(['status' => 'approved', 'paid_at' => now()]);
             $order->notifyStatusChange();
+            $order->applyLoyaltyProgress();
+            $order->sendReceiptEmail();
         } elseif ($paystackStatus === 'success') {
             // Paid, but not the right amount — don't silently approve it.
             Log::warning('Paystack verify amount mismatch', [
