@@ -56,22 +56,25 @@ class OrderController extends Controller
             : ($setting->delivery_fee ?? 0);
 
         // A student's running kg total (Order::applyLoyaltyProgress) reaching
-        // the admin's threshold unlocks a discount that auto-applies here, on
-        // their next order — after which their total resets to 0 so they
-        // start building toward the next reward. price_per_kg stays the
-        // normal/offer rate; the discount is its own line item subtracted
-        // from the total, so "gas cost" on receipts always reads honestly.
+        // the admin's threshold unlocks a discount. If this order's kg carries
+        // them past the threshold mid-order (e.g. 8kg progress + 5kg refill on
+        // a 10kg threshold), only the kg beyond what was needed to complete
+        // the coupon gets discounted (2kg completes it, the other 3kg is
+        // discounted) — not the whole order, and not nothing. price_per_kg
+        // stays the normal/offer rate; the discount is its own line item
+        // subtracted from the total, so "gas cost" on receipts always reads
+        // honestly.
         $loyaltyDiscountApplied = false;
         $loyaltyDiscountAmount = null;
 
-        if (
-            $setting->loyalty_enabled
-            && $setting->loyalty_threshold_kg
-            && $setting->loyalty_discount_percent
-            && (float) $user->loyalty_progress_kg >= (float) $setting->loyalty_threshold_kg
-        ) {
-            $loyaltyDiscountAmount = round($pricePerKg * $validated['kg'] * ($setting->loyalty_discount_percent / 100), 2);
-            $loyaltyDiscountApplied = true;
+        if ($setting->loyalty_enabled && $setting->loyalty_threshold_kg && $setting->loyalty_discount_percent) {
+            $neededToComplete = max((float) $setting->loyalty_threshold_kg - (float) $user->loyalty_progress_kg, 0);
+            $discountableKg = max((float) $validated['kg'] - $neededToComplete, 0);
+
+            if ($discountableKg > 0) {
+                $loyaltyDiscountAmount = round($pricePerKg * $discountableKg * ($setting->loyalty_discount_percent / 100), 2);
+                $loyaltyDiscountApplied = true;
+            }
         }
 
         $imagePath = $request->hasFile('cylinder_image')
