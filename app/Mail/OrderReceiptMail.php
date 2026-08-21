@@ -22,12 +22,16 @@ class OrderReceiptMail extends Mailable
         // The PDF (rendered server-side by dompdf, which has no browser
         // session and would otherwise need remote fetching enabled) gets
         // images inlined as base64 data URIs. The HTML email body instead
-        // uses real hosted URLs, because Gmail and most webmail clients
-        // strip data: URI images from received HTML mail.
+        // embeds the logo as a CID inline attachment (via $message->embed()
+        // in the Blade view), since Gmail and most webmail clients strip
+        // data: URI images from received HTML mail, and a hosted URL would
+        // require APP_URL to be a publicly reachable address.
+        $logoPath = public_path('images/logo.jpeg');
+
         $data = [
             'order' => $this->order,
-            'logoDataUri' => $this->fileToDataUri(public_path('images/logo.jpeg')),
-            'logoUrl' => asset('images/logo.jpeg'),
+            'logoDataUri' => $this->fileToDataUri($logoPath),
+            'logoPath' => is_file($logoPath) ? $logoPath : null,
             'cylinderDataUri' => $this->order->cylinder_image
                 ? $this->fileToDataUri(Storage::disk('public')->path($this->order->cylinder_image))
                 : null,

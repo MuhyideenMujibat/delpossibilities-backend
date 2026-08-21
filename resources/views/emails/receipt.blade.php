@@ -30,8 +30,8 @@
 <div class="wrapper">
   <div class="card">
     <div class="header">
-      @if($logoUrl)
-        <img src="{{ $logoUrl }}" alt="D'EL-Possibilities">
+      @if($logoPath)
+        <img src="{{ $message->embed($logoPath) }}" alt="D'EL-Possibilities">
       @endif
       <div class="brand">D'EL-POSSIBILITIES</div>
     </div>
