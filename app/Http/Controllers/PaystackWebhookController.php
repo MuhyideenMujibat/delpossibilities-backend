@@ -35,6 +35,28 @@ class PaystackWebhookController extends Controller
     $reference = $event['data']['reference'];
     $amountPaidInKobo = $event['data']['amount'];
 
+    // Step 8: Route by reference prefix — orders, subscriptions, and
+    // standalone cart checkouts generate references as 'order_{id}_...' /
+    // 'subscription_{id}_...' / 'product_order_{id}_...' respectively (see
+    // OrderController::pay / SubscriberController::pay /
+    // ProductOrderController::pay), so the prefix alone is enough to tell
+    // which flow this event belongs to. product_order_ must be checked
+    // before falling through to handleOrderPayment, since that's a bare
+    // else and 'product_order_...' doesn't start with 'order_' either way
+    // — but the explicit branch keeps the routing unambiguous.
+    if (str_starts_with($reference, 'subscription_')) {
+        return $this->handleSubscriptionPayment($reference, $amountPaidInKobo);
+    }
+
+    if (str_starts_with($reference, 'product_order_')) {
+        return $this->handleProductOrderPayment($reference, $amountPaidInKobo);
+    }
+
+    return $this->handleOrderPayment($reference, $amountPaidInKobo);
+}
+
+private function handleOrderPayment(string $reference, int $amountPaidInKobo)
+{
     // Step 8: Find the order using that reference
     $order = \App\Models\Order::where('paystack_reference', $reference)->first();
 
@@ -68,6 +90,81 @@ class PaystackWebhookController extends Controller
         $order->notifyStatusChange();
         $order->applyLoyaltyProgress();
         $order->sendReceiptEmail();
+
+        // A bundled cart that was still pending rides on this same charge —
+        // mark it paid too, since it never gets its own reference/webhook
+        // event. An already-approved cart (attached after being paid for
+        // standalone) is left untouched — it kept its own real paid_at.
+        if ($order->productOrder?->status === 'pending') {
+            $order->productOrder->update(['status' => 'approved', 'paid_at' => $order->paid_at]);
+        }
+
+        $order->user->grantReferralRewardIfEligible();
+    }
+
+    return response()->json(['status' => 'success']);
+}
+
+private function handleProductOrderPayment(string $reference, int $amountPaidInKobo)
+{
+    $productOrder = \App\Models\ProductOrder::where('paystack_reference', $reference)->first();
+
+    if (!$productOrder) {
+        return response()->json(['status' => 'product order not found']);
+    }
+
+    $expectedAmountInKobo = (int) ($productOrder->total_amount * 100);
+
+    if ($amountPaidInKobo !== $expectedAmountInKobo) {
+        Log::warning('Paystack webhook product order amount mismatch', [
+            'product_order_id' => $productOrder->id,
+            'expected' => $expectedAmountInKobo,
+            'paid' => $amountPaidInKobo,
+        ]);
+
+        return response()->json(['status' => 'amount mismatch']);
+    }
+
+    if ($productOrder->status === 'pending') {
+        $productOrder->update(['status' => 'approved', 'paid_at' => now()]);
+    }
+
+    return response()->json(['status' => 'success']);
+}
+
+private function handleSubscriptionPayment(string $reference, int $amountPaidInKobo)
+{
+    $payment = \App\Models\SubscriptionPayment::where('paystack_reference', $reference)->first();
+
+    if (!$payment) {
+        return response()->json(['status' => 'subscription payment not found']);
+    }
+
+    $expectedAmountInKobo = (int) ($payment->amount * 100);
+
+    if ($amountPaidInKobo !== $expectedAmountInKobo) {
+        Log::warning('Paystack webhook subscription amount mismatch', [
+            'subscriber_id' => $payment->subscriber_id,
+            'expected' => $expectedAmountInKobo,
+            'paid' => $amountPaidInKobo,
+        ]);
+
+        return response()->json(['status' => 'amount mismatch']);
+    }
+
+    $subscriber = $payment->subscriber;
+    $subscriber?->load('plan');
+
+    if ($subscriber && $subscriber->status === 'pending') {
+        try {
+            $subscriber->activate($payment);
+        } catch (\RuntimeException $e) {
+            Log::warning('Subscription payment received but calendar not set', [
+                'subscriber_id' => $subscriber->id,
+            ]);
+
+            return response()->json(['status' => 'calendar not set']);
+        }
     }
 
     return response()->json(['status' => 'success']);

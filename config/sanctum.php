@@ -50,7 +50,10 @@ return [
     |
     */
 
-    'expiration' => 180,
+    // 60 days — students refill roughly monthly, not daily, so a short
+    // session forced them to re-login mid-cycle. Matches SESSION_DURATION_MS
+    // on the frontend (src/api.js).
+    'expiration' => 60 * 24 * 60,
 
     /*
     |--------------------------------------------------------------------------

@@ -30,6 +30,7 @@ class AuthController extends Controller
             // against the admin-managed hostel list.
             'hostel' => ['required', 'string', 'max:255'],
             'phone' => ['required', 'string', 'max:255'],
+            'referred_by_customer_id' => ['nullable', 'string', 'exists:subscribers,customer_id'],
         ];
 
         if ($request->input('location_type') === 'hostel') {
@@ -48,6 +49,7 @@ class AuthController extends Controller
                 'hostel' => $validated['hostel'],
                 'location_type' => $validated['location_type'],
                 'phone' => $validated['phone'],
+                'referred_by_customer_id' => $validated['referred_by_customer_id'] ?? null,
                 'otp_code' => $otp,
                 'otp_expires_at' => now()->addMinutes(10),
             ]
@@ -84,6 +86,14 @@ class AuthController extends Controller
             ]);
         }
 
+        // Resolved silently — a referral code that stopped resolving in the
+        // few minutes between submitting the form and verifying the OTP
+        // (e.g. the subscriber was deleted) just means no referral link,
+        // not a failed registration this far in.
+        $referrerUserId = $pending->referred_by_customer_id
+            ? \App\Models\Subscriber::where('customer_id', $pending->referred_by_customer_id)->value('user_id')
+            : null;
+
         $user = User::create([
             'name' => $pending->name,
             'email' => $pending->email,
@@ -91,6 +101,7 @@ class AuthController extends Controller
             'hostel' => $pending->hostel,
             'location_type' => $pending->location_type,
             'phone' => $pending->phone,
+            'referred_by_user_id' => $referrerUserId,
             'role' => 'student',
             'email_verified_at' => now(),
         ]);

@@ -2,7 +2,9 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\DeliveryZone;
 use App\Models\Order;
+use App\Models\ProductOrder;
 use App\Models\Setting;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
@@ -20,6 +22,10 @@ class OrderController extends Controller
             'location_type' => ['required', Rule::in(['hostel', 'off_campus'])],
             'hostel_address' => ['required', 'string', 'max:255'],
             'cylinder_image' => ['nullable', 'image', 'max:5120'],
+            'delivery_zone_id' => ['nullable', 'required_if:location_type,off_campus', 'integer', 'exists:delivery_zones,id'],
+            'product_order_id' => ['nullable', 'integer', 'exists:product_orders,id'],
+            'attached_product_order_id' => ['nullable', 'integer', 'different:product_order_id', 'exists:product_orders,id'],
+            'use_referral_credit' => ['sometimes', 'boolean'],
         ]);
 
         $user = $request->user();
@@ -51,28 +57,112 @@ class OrderController extends Controller
         $pricePerKg = $setting->offer_active && $setting->offer_price_per_kg
             ? $setting->offer_price_per_kg
             : $setting->price_per_kg;
+
+        // Off-campus delivery is zone-based (student picks a named zone,
+        // each with its own admin-set fee) rather than the old flat
+        // Setting::off_campus_delivery_fee. On-campus stays a flat fee.
+        $deliveryZone = null;
+        if ($validated['location_type'] === 'off_campus') {
+            $deliveryZone = DeliveryZone::where('is_active', true)->find($validated['delivery_zone_id']);
+
+            if (! $deliveryZone) {
+                throw ValidationException::withMessages([
+                    'delivery_zone_id' => ['Please select a valid delivery zone.'],
+                ]);
+            }
+        }
+
         $deliveryFee = $validated['location_type'] === 'off_campus'
-            ? ($setting->off_campus_delivery_fee ?? 0)
+            ? (float) $deliveryZone->fee
             : ($setting->delivery_fee ?? 0);
 
-        // A student's running kg total (Order::applyLoyaltyProgress) reaching
-        // the admin's threshold unlocks a discount. If this order's kg carries
-        // them past the threshold mid-order (e.g. 8kg progress + 5kg refill on
-        // a 10kg threshold), only the kg beyond what was needed to complete
-        // the coupon gets discounted (2kg completes it, the other 3kg is
-        // discounted) — not the whole order, and not nothing. price_per_kg
-        // stays the normal/offer rate; the discount is its own line item
-        // subtracted from the total, so "gas cost" on receipts always reads
-        // honestly.
+        // Referral credit — earned by referring other students who go on
+        // to pay for a gas order or subscription (see
+        // User::grantReferralRewardIfEligible) — can offset this order's
+        // delivery fee, up to whichever is smaller: the fee itself, or the
+        // student's available balance. Applied and decremented in the same
+        // request; there's no separate confirmation step since this isn't
+        // itself a charge, just a discount.
+        $referralCreditApplied = 0;
+        if ($request->boolean('use_referral_credit') && (float) $user->referral_credit_balance > 0) {
+            $referralCreditApplied = min($deliveryFee, (float) $user->referral_credit_balance);
+        }
+
+        // An Eazy Market / Gas Services cart (see ProductOrderController) can
+        // ride along with this order in TWO independent ways, and a student
+        // can use both at once:
+        //  - `product_order_id`: a still-unpaid cart bundled in — its total
+        //    folds additively into this order's own Paystack charge.
+        //  - `attached_product_order_id`: a cart already paid for standalone
+        //    (e.g. via Cart.jsx's "Checkout Cart Only") — just tagged to this
+        //    delivery for fulfilment tracking, nothing folded into the charge.
+        // Keeping them separate is what lets a student pay for one shop item,
+        // attach it here, AND still bundle their other unpaid cart items on
+        // the same refill without either dropping off the order.
+        $productOrder = null;
+        $productOrderTotal = 0;
+        if (! empty($validated['product_order_id'])) {
+            $productOrder = ProductOrder::where('id', $validated['product_order_id'])
+                ->where('user_id', $user->id)
+                ->whereIn('status', ['pending', 'approved'])
+                ->first();
+
+            if (! $productOrder) {
+                throw ValidationException::withMessages([
+                    'product_order_id' => ['This cart order is no longer available to attach.'],
+                ]);
+            }
+
+            if ($productOrder->status === 'pending') {
+                $productOrderTotal = (float) $productOrder->total_amount;
+            } elseif ($productOrder->isLinked()) {
+                throw ValidationException::withMessages([
+                    'product_order_id' => ['This cart order is already attached to another delivery.'],
+                ]);
+            }
+        }
+
+        $attachedProductOrder = null;
+        if (! empty($validated['attached_product_order_id'])) {
+            $attachedProductOrder = ProductOrder::where('id', $validated['attached_product_order_id'])
+                ->where('user_id', $user->id)
+                ->where('status', 'approved')
+                ->first();
+
+            if (! $attachedProductOrder) {
+                throw ValidationException::withMessages([
+                    'attached_product_order_id' => ['This paid cart order is no longer available to attach.'],
+                ]);
+            }
+
+            if ($attachedProductOrder->isLinked()) {
+                throw ValidationException::withMessages([
+                    'attached_product_order_id' => ['This cart order is already attached to another delivery.'],
+                ]);
+            }
+        }
+
+        // Loyalty discount. Once the student's running kg total
+        // (loyalty_progress_kg, advanced only by paid orders — see
+        // Order::applyLoyaltyProgress) reaches the admin's threshold, the
+        // portion of an order BEYOND what was still needed to complete the
+        // threshold is discounted, on that same order. Example, 5 kg
+        // threshold: progress 4 kg, then a 4 kg order — 1 kg completes the
+        // threshold, the other 3 kg gets the discount. An order that only
+        // lands the total exactly on the threshold (nothing left over) isn't
+        // discounted; the next order is. price_per_kg stays the normal/offer
+        // rate — the discount is its own line item subtracted from the
+        // total, so "gas cost" on receipts reads honestly. Applying a
+        // discount resets progress to 0 (Order::applyLoyaltyProgress).
         $loyaltyDiscountApplied = false;
         $loyaltyDiscountAmount = null;
 
-        if ($setting->loyalty_enabled && $setting->loyalty_threshold_kg && $setting->loyalty_discount_percent) {
+        if ($setting->loyaltyActive()) {
             $neededToComplete = max((float) $setting->loyalty_threshold_kg - (float) $user->loyalty_progress_kg, 0);
             $discountableKg = max((float) $validated['kg'] - $neededToComplete, 0);
 
             if ($discountableKg > 0) {
-                $loyaltyDiscountAmount = round($pricePerKg * $discountableKg * ($setting->loyalty_discount_percent / 100), 2);
+                $loyaltyDiscountAmount = round((float) $pricePerKg * $discountableKg * ((float) $setting->loyalty_discount_percent / 100), 2);
                 $loyaltyDiscountApplied = true;
             }
         }
@@ -88,11 +178,21 @@ class OrderController extends Controller
             'loyalty_discount_applied' => $loyaltyDiscountApplied,
             'loyalty_discount_amount' => $loyaltyDiscountAmount,
             'delivery_fee' => $deliveryFee,
-            'total_amount' => round($validated['kg'] * $pricePerKg - ($loyaltyDiscountAmount ?? 0) + $deliveryFee, 2),
+            'referral_credit_applied' => $referralCreditApplied,
+            'product_order_id' => $productOrder?->id,
+            'attached_product_order_id' => $attachedProductOrder?->id,
+            'total_amount' => round(
+                $validated['kg'] * $pricePerKg - ($loyaltyDiscountAmount ?? 0) + $deliveryFee - $referralCreditApplied + $productOrderTotal, 2
+            ),
             'hostel_address' => $validated['hostel_address'],
             'location_type' => $validated['location_type'],
+            'delivery_zone_id' => $deliveryZone?->id,
             'status' => 'pending',
         ]);
+
+        if ($referralCreditApplied > 0) {
+            $user->decrement('referral_credit_balance', $referralCreditApplied);
+        }
 
         return response()->json($order, 201);
     }
@@ -100,7 +200,10 @@ class OrderController extends Controller
     public function myOrders(Request $request)
     {
         return response()->json(
-            $request->user()->orders()->latest()->get()
+            $request->user()->orders()
+                ->with(['productOrder.items', 'attachedProductOrder.items'])
+                ->latest()
+                ->get()
         );
     }
 
@@ -188,7 +291,14 @@ class OrderController extends Controller
         }
 
         if ($order->status !== 'pending') {
-            return response()->json(['order' => $order, 'paystack_status' => 'success']);
+            return response()->json([
+                'order' => $order,
+                'paystack_status' => 'success',
+                'loyalty' => array_merge(
+                    $order->user->loyaltySummary(),
+                    ['discount_applied_to_this_order' => (bool) $order->loyalty_discount_applied]
+                ),
+            ]);
         }
 
         if (! $order->paystack_reference) {
@@ -228,6 +338,19 @@ class OrderController extends Controller
             $order->notifyStatusChange();
             $order->applyLoyaltyProgress();
             $order->sendReceiptEmail();
+
+            // A bundled cart that was still `pending` was paid for as part
+            // of this exact charge — it never gets its own
+            // paystack_reference (its own pay() is never called in the
+            // bundled path), so mark it paid here, in lockstep with the gas
+            // order it rode in on. An already-`approved` cart (attached
+            // after being paid for standalone) is left untouched — it kept
+            // its own real paid_at, this order never charged for it.
+            if ($order->productOrder?->status === 'pending') {
+                $order->productOrder->update(['status' => 'approved', 'paid_at' => $order->paid_at]);
+            }
+
+            $order->user->grantReferralRewardIfEligible();
         } elseif ($paystackStatus === 'success') {
             // Paid, but not the right amount — don't silently approve it.
             Log::warning('Paystack verify amount mismatch', [
@@ -237,9 +360,19 @@ class OrderController extends Controller
             ]);
         }
 
+        // The student's loyalty standing *after* this payment settled — so
+        // the callback screen can tell them how much kg is left to unlock the
+        // next reward, that a reward is now waiting, or that this order just
+        // spent one.
+        $loyalty = array_merge(
+            $order->user->fresh()->loyaltySummary(),
+            ['discount_applied_to_this_order' => (bool) $order->loyalty_discount_applied]
+        );
+
         return response()->json([
             'order' => $order->fresh(),
             'paystack_status' => $paystackStatus,
+            'loyalty' => $loyalty,
         ]);
     }
 
@@ -258,6 +391,18 @@ class OrderController extends Controller
 
         $order->update(['status' => $validated['status']]);
         $order->notifyStatusChange();
+
+        // Any cart riding on this same delivery trip — bundled or attached —
+        // has its fulfilment status follow the order's, one delivery tracked
+        // in one place. Payment for each already happened (bundled: as part
+        // of this order's single charge; attached: standalone earlier), so
+        // only the status moves here.
+        if ($order->product_order_id) {
+            $order->productOrder?->update(['status' => $validated['status']]);
+        }
+        if ($order->attached_product_order_id) {
+            $order->attachedProductOrder?->update(['status' => $validated['status']]);
+        }
 
         return response()->json($order);
     }

@@ -23,5 +23,9 @@ class DatabaseSeeder extends Seeder
         ]);
 
         $this->call(SettingSeeder::class);
+        $this->call(SubscriptionPlanSeeder::class);
+        $this->call(ProductSeeder::class);
+        $this->call(DeliveryZoneSeeder::class);
+        $this->call(EazyMarketDeliveryTierSeeder::class);
     }
 }

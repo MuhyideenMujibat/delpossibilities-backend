@@ -13,6 +13,7 @@ class PendingRegistration extends Model
         'hostel',
         'location_type',
         'phone',
+        'referred_by_customer_id',
         'otp_code',
         'otp_expires_at',
     ];

@@ -22,9 +22,13 @@ class Order extends Model
         'loyalty_discount_applied',
         'loyalty_discount_amount',
         'delivery_fee',
+        'referral_credit_applied',
+        'product_order_id',
+        'attached_product_order_id',
         'total_amount',
         'hostel_address',
         'location_type',
+        'delivery_zone_id',
         'status',
         'paystack_reference',
         'payment_authorization_url',
@@ -37,6 +41,7 @@ class Order extends Model
             'paid_at' => 'datetime',
             'loyalty_discount_applied' => 'boolean',
             'loyalty_discount_amount' => 'decimal:2',
+            'referral_credit_applied' => 'decimal:2',
         ];
     }
 
@@ -53,6 +58,26 @@ class Order extends Model
     public function notifications()
     {
         return $this->hasMany(Notification::class);
+    }
+
+    // The Eazy Market / Gas Services cart bundled UNPAID into this checkout,
+    // if any — its total folds into this order's own charge.
+    public function productOrder()
+    {
+        return $this->belongsTo(ProductOrder::class);
+    }
+
+    // A separate cart that was ALREADY PAID FOR standalone and is just tagged
+    // to this delivery for fulfilment — adds nothing to this order's charge.
+    // Independent of productOrder(): an order can carry both at once.
+    public function attachedProductOrder()
+    {
+        return $this->belongsTo(ProductOrder::class, 'attached_product_order_id');
+    }
+
+    public function deliveryZone()
+    {
+        return $this->belongsTo(DeliveryZone::class);
     }
 
     // Mirrors STATUS_LABELS in the frontend's api.js — kept in sync manually
@@ -113,10 +138,17 @@ class Order extends Model
         );
     }
 
-    // Called once this order is confirmed paid. If it redeemed an earned
-    // loyalty reward, the student's running total resets so they start
-    // building toward the next one; otherwise this order's kg counts
-    // toward their next reward.
+    // Called once this order is confirmed paid — the only place a student's
+    // loyalty progress moves (pending, unpaid orders never count).
+    //
+    //  - If a discount was applied to this order, the reward has been spent:
+    //    the running total resets to 0 and the student starts building toward
+    //    the next one.
+    //  - Otherwise this order's full kg is added to the running total.
+    //
+    // The "how much is discounted / how much is left to unlock" maths lives
+    // in OrderController::store and User::loyaltyKgToNextReward, both reading
+    // this same running total.
     public function applyLoyaltyProgress(): void
     {
         $user = $this->user;
@@ -127,7 +159,7 @@ class Order extends Model
 
         $user->loyalty_progress_kg = $this->loyalty_discount_applied
             ? 0
-            : (float) $user->loyalty_progress_kg + (float) $this->kg;
+            : round((float) $user->loyalty_progress_kg + (float) $this->kg, 2);
 
         $user->save();
     }

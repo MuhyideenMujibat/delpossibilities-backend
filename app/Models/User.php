@@ -33,6 +33,9 @@ class User extends Authenticatable
         'phone',
         'cylinder_image',
         'email_verified_at',
+        'referred_by_user_id',
+        'referral_reward_granted',
+        'referral_credit_balance',
     ];
 
     protected $appends = [
@@ -63,6 +66,8 @@ class User extends Authenticatable
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
             'loyalty_progress_kg' => 'decimal:2',
+            'referral_reward_granted' => 'boolean',
+            'referral_credit_balance' => 'decimal:2',
         ];
     }
 
@@ -70,6 +75,48 @@ class User extends Authenticatable
 {
     return $this->hasMany(Order::class);
 }
+
+    public function subscribers()
+    {
+        return $this->hasMany(Subscriber::class);
+    }
+
+    public function productOrders()
+    {
+        return $this->hasMany(ProductOrder::class);
+    }
+
+    public function investments()
+    {
+        return $this->hasMany(Investment::class);
+    }
+
+    public function referrer()
+    {
+        return $this->belongsTo(User::class, 'referred_by_user_id');
+    }
+
+    // Called from the two paths that count as a "qualifying purchase" for
+    // referral purposes — Order/PaystackWebhookController's paid-order
+    // side effects, and Subscriber::activate(). A standalone Eazy Market
+    // purchase never calls this. The referral_reward_granted flag (checked
+    // here, not "is this their first order") is what makes this safely
+    // idempotent regardless of which of the two trigger points fires first.
+    public function grantReferralRewardIfEligible(): void
+    {
+        if (! $this->referred_by_user_id || $this->referral_reward_granted) {
+            return;
+        }
+
+        $amount = (float) (Setting::current()->referral_reward_amount ?? 0);
+
+        if ($amount <= 0) {
+            return;
+        }
+
+        static::where('id', $this->referred_by_user_id)->increment('referral_credit_balance', $amount);
+        $this->update(['referral_reward_granted' => true]);
+    }
 
     public function notifications()
     {
@@ -97,15 +144,16 @@ class User extends Authenticatable
     }
 
     // True once this student's running kg total (since their last redeemed
-    // reward) has reached the admin-configured threshold — their next order
-    // will automatically get the loyalty discount applied.
+    // reward) has reached the admin-configured threshold — the portion of
+    // their next order beyond the threshold gets the loyalty discount, and
+    // the running total then resets.
     protected function loyaltyRewardAvailable(): Attribute
     {
         return Attribute::make(
             get: function () {
                 $setting = Setting::current();
 
-                if (! $setting->loyalty_enabled || ! $setting->loyalty_threshold_kg) {
+                if (! $setting->loyaltyActive()) {
                     return false;
                 }
 
@@ -114,15 +162,16 @@ class User extends Authenticatable
         );
     }
 
-    // How many more kg this student needs to buy before unlocking the next
-    // loyalty discount. Null when the program is off or already unlocked.
+    // How many more kg this student needs to buy (across paid orders) before
+    // the loyalty discount kicks in. Null when the program is off; 0 once the
+    // threshold is reached.
     protected function loyaltyKgToNextReward(): Attribute
     {
         return Attribute::make(
             get: function () {
                 $setting = Setting::current();
 
-                if (! $setting->loyalty_enabled || ! $setting->loyalty_threshold_kg) {
+                if (! $setting->loyaltyActive()) {
                     return null;
                 }
 
@@ -131,6 +180,25 @@ class User extends Authenticatable
                 return $remaining > 0 ? round($remaining, 2) : 0;
             },
         );
+    }
+
+    // One bundle of the student's current loyalty standing, for the frontend
+    // to show after an order (see OrderController::verifyPayment) without
+    // having to also fetch /price. Combines the admin config with this
+    // student's own progress.
+    public function loyaltySummary(): array
+    {
+        $setting = Setting::current();
+        $active = $setting->loyaltyActive();
+
+        return [
+            'enabled' => $active,
+            'threshold_kg' => $active ? (float) $setting->loyalty_threshold_kg : null,
+            'discount_percent' => $active ? (float) $setting->loyalty_discount_percent : null,
+            'progress_kg' => (float) $this->loyalty_progress_kg,
+            'reward_available' => $this->loyalty_reward_available,
+            'kg_to_next_reward' => $this->loyalty_kg_to_next_reward,
+        ];
     }
 
     // Super admins implicitly hold every permission — they aren't tracked
