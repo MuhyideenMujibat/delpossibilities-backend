@@ -128,7 +128,10 @@ class ProductOrderController extends Controller
 
     public function mine(Request $request)
     {
-        $productOrder = $request->user()->productOrders()->with('items')->latest()->first();
+        $productOrder = $request->user()->productOrders()
+            ->with(['items', 'refill', 'attachingRefill', 'order', 'attachingOrder'])
+            ->latest()
+            ->first();
 
         return response()->json($productOrder);
     }
@@ -145,6 +148,7 @@ class ProductOrderController extends Controller
                     'order:id,status,product_order_id',
                     'attachingOrder:id,status,attached_product_order_id',
                     'refill:id,status,product_order_id',
+                    'attachingRefill:id,status,attached_product_order_id',
                 ])
                 ->latest()
                 ->get()
@@ -172,8 +176,10 @@ class ProductOrderController extends Controller
         // exempt: their whole model is paying for a cart standalone now and
         // attaching it to their next refill request later (see
         // RefillController::store), so the "companion" is their ongoing
-        // subscription rather than something in this same cart/charge.
-        $isActiveSubscriber = $user->subscribers()->where('status', 'active')->exists();
+        // subscription rather than something in this same cart/charge — but
+        // only a USABLE subscription counts, an exhausted/expired one has no
+        // "next refill" to ride on.
+        $isActiveSubscriber = $user->subscribers()->usable()->exists();
         if (! $isActiveSubscriber && $productOrder->loadMissing('items')->isEazyMarketOnly()) {
             throw ValidationException::withMessages([
                 'items' => ['Eazy Market items need a gas accessory in the same cart, or to be attached to a gas refill — they can\'t be delivered on their own.'],
@@ -282,7 +288,9 @@ class ProductOrderController extends Controller
         }
 
         return response()->json([
-            'product_order' => $productOrder->fresh('items'),
+            // refill/attachingRefill let the callback screen say "this rides
+            // on your subscription refill" and link straight there.
+            'product_order' => $productOrder->fresh(['items', 'refill', 'attachingRefill', 'order', 'attachingOrder']),
             'paystack_status' => $paystackStatus,
         ]);
     }

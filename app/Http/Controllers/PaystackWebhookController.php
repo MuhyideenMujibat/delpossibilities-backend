@@ -99,7 +99,7 @@ private function handleOrderPayment(string $reference, int $amountPaidInKobo)
             $order->productOrder->update(['status' => 'approved', 'paid_at' => $order->paid_at]);
         }
 
-        $order->user->grantReferralRewardIfEligible();
+        $order->user->grantReferralRewardIfEligible((float) $order->kg);
     }
 
     return response()->json(['status' => 'success']);

@@ -50,15 +50,39 @@ class Subscriber extends Model
         return $this->hasMany(SubscriptionPayment::class);
     }
 
+    // "Usable" = the one row that should actually drive the app: active,
+    // still has kg, and not past its end date. `status` never auto-flips to
+    // 'expired' (see the comments in SubscriberController), so a plain
+    // where('status','active') can hand back a long-dead row — and an
+    // account can legitimately hold more than one 'active' row at once
+    // (renewed after exhaustion, or received a transfer while still holding
+    // an old exhausted one). Every "which subscription is this account
+    // on?" lookup should go through here.
+    public function scopeUsable($query)
+    {
+        return $query->where('status', 'active')
+            ->where('remaining_kg', '>', 0)
+            ->where(fn ($q) => $q->whereNull('ends_at')->orWhere('ends_at', '>=', now()));
+    }
+
     // Year-scoped, human-friendly, transferable customer ID (DEL-2026-0001).
     // Scoped per calendar year so the sequence — and the id's length — stays
     // short instead of growing unbounded over the platform's lifetime.
     public static function generateCustomerId(): string
     {
         $year = now()->year;
-        $count = static::where('customer_id', 'like', "DEL-{$year}-%")->count();
+        $sequence = static::where('customer_id', 'like', "DEL-{$year}-%")->count() + 1;
 
-        return sprintf('DEL-%d-%04d', $year, $count + 1);
+        // The count is only a starting guess — codes can be sparse (accounts
+        // that never subscribed, or rows whose code was transferred in from
+        // another year). Step forward until we hit one that's actually free
+        // so this can never return a value that violates the unique index.
+        do {
+            $candidate = sprintf('DEL-%d-%04d', $year, $sequence);
+            $sequence++;
+        } while (static::where('customer_id', $candidate)->exists());
+
+        return $candidate;
     }
 
     // Shared by both confirmation paths (SubscriberController::verifyPayment
@@ -86,8 +110,6 @@ class Subscriber extends Model
         ]);
 
         $payment->update(['paid_at' => now()]);
-
-        $this->user->grantReferralRewardIfEligible();
     }
 
     // The current session/semester calendar (admin-configured on Settings)

@@ -30,7 +30,19 @@ class AuthController extends Controller
             // against the admin-managed hostel list.
             'hostel' => ['required', 'string', 'max:255'],
             'phone' => ['required', 'string', 'max:255'],
-            'referred_by_customer_id' => ['nullable', 'string', 'exists:subscribers,customer_id'],
+            // Every account now carries a customer_id from signup, so a
+            // referral code can belong to a plain user or a legacy subscriber.
+            'referred_by_customer_id' => [
+                'nullable', 'string',
+                function ($attribute, $value, $fail) {
+                    $known = \App\Models\User::where('customer_id', $value)->exists()
+                        || \App\Models\Subscriber::where('customer_id', $value)->exists();
+
+                    if (! $known) {
+                        $fail('That referral code was not found.');
+                    }
+                },
+            ],
         ];
 
         if ($request->input('location_type') === 'hostel') {
@@ -88,11 +100,14 @@ class AuthController extends Controller
 
         // Resolved silently — a referral code that stopped resolving in the
         // few minutes between submitting the form and verifying the OTP
-        // (e.g. the subscriber was deleted) just means no referral link,
-        // not a failed registration this far in.
-        $referrerUserId = $pending->referred_by_customer_id
-            ? \App\Models\Subscriber::where('customer_id', $pending->referred_by_customer_id)->value('user_id')
-            : null;
+        // (e.g. the account was deleted) just means no referral link, not a
+        // failed registration this far in. Prefer a user's own code, fall
+        // back to a legacy subscriber code.
+        $referrerUserId = null;
+        if ($pending->referred_by_customer_id) {
+            $referrerUserId = \App\Models\User::where('customer_id', $pending->referred_by_customer_id)->value('id')
+                ?: \App\Models\Subscriber::where('customer_id', $pending->referred_by_customer_id)->value('user_id');
+        }
 
         $user = User::create([
             'name' => $pending->name,
@@ -107,6 +122,15 @@ class AuthController extends Controller
         ]);
 
         $pending->delete();
+
+        // Both referral coupons go to the REFERRER. One lands here, the
+        // moment someone registers with their code; the second comes later,
+        // once that student pays for a gas order of 3 kg+ (see
+        // User::grantReferralRewardIfEligible). The student who used the code
+        // gets no discount themselves.
+        if ($referrerUserId) {
+            User::where('id', $referrerUserId)->increment('referral_discount_available');
+        }
 
         $token = $user->createToken('auth_token')->plainTextToken;
 

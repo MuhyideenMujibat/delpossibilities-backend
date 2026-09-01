@@ -23,18 +23,27 @@ class SubscriberController extends Controller
         $user = $request->user();
         $plan = SubscriptionPlan::findOrFail($validated['subscription_plan_id']);
 
-        // A student can only ride one subscription at a time — a fresh one
-        // can only start once the last is paid-for-and-over (expired) or
-        // was never paid (pending, e.g. abandoned checkout gets replaced).
-        $existing = $user->subscribers()->where('status', 'active')->first();
+        // A student can only ride one USABLE subscription at a time. An
+        // 'active' row that's out of kg or past its end date doesn't count
+        // (status never auto-flips to 'expired'), so an exhausted subscriber
+        // — including someone who received a transfer that had nothing left
+        // in it — can still start a fresh one.
+        $existing = $user->subscribers()->usable()->exists();
         if ($existing) {
             throw ValidationException::withMessages([
                 'subscription_plan_id' => ['You already have an active subscription.'],
             ]);
         }
 
+        // A pending row is an abandoned, still-unpaid pick. If the student is
+        // now choosing the SAME plan again, hand it straight back
+        // (idempotent). If they picked a DIFFERENT plan, they walked away
+        // from the first one — repoint this row to the new plan/price rather
+        // than making them pay for the plan they abandoned, and bin any
+        // stale unpaid Paystack transaction so pay() starts a fresh one for
+        // the right amount.
         $pendingExisting = $user->subscribers()->where('status', 'pending')->latest()->first();
-        if ($pendingExisting) {
+        if ($pendingExisting && (int) $pendingExisting->subscription_plan_id === (int) $plan->id) {
             return response()->json($pendingExisting->load('plan'), 200);
         }
 
@@ -44,8 +53,30 @@ class SubscriberController extends Controller
             ], 422);
         }
 
+        if ($pendingExisting) {
+            $pendingExisting->payments()->whereNull('paid_at')->delete();
+            $pendingExisting->update([
+                'subscription_plan_id' => $plan->id,
+                'locked_price' => $plan->price,
+            ]);
+
+            return response()->json($pendingExisting->fresh()->load('plan'), 200);
+        }
+
         $subscriber = $user->subscribers()->create([
-            'customer_id' => Subscriber::generateCustomerId(),
+            // A subscriber row's customer_id always mirrors whoever
+            // currently owns it — this account's own permanent code, set
+            // once at signup (see User::customerIdFor) and never changed by
+            // subscribing, resubscribing, or receiving a transfer. It only
+            // moves when THIS account gives a subscription away (see
+            // transfer(), which repoints it to the recipient's own code).
+            // subscribers.customer_id has no uniqueness constraint (see
+            // migration 2026_09_01_190000) precisely because the same code
+            // legitimately reappears on every one of an account's own rows
+            // across subscription cycles. generateCustomerId() is only a
+            // defensive fallback for the practically-impossible case of a
+            // blank account-level code.
+            'customer_id' => $user->customer_id ?: Subscriber::generateCustomerId(),
             'subscription_plan_id' => $plan->id,
             'locked_price' => $plan->price,
             'status' => 'pending',
@@ -59,10 +90,43 @@ class SubscriberController extends Controller
 
     public function mine(Request $request)
     {
-        $subscriber = $request->user()->subscribers()
-            ->with(['plan', 'refills' => fn ($q) => $q->latest()])
+        $user = $request->user();
+
+        // Refill history is scoped to who actually requested each one
+        // (Refill::user_id, snapshotted at creation), not to whoever
+        // currently owns the subscriber row it's attached to — a transfer
+        // moves the subscription, not the delivery history riding on it, so
+        // a transfer recipient never inherits the sender's past refills (and
+        // vice versa for a still-pending one the sender chose to "carry").
+        $subscribers = $user->subscribers()
+            ->with(['plan', 'refills' => fn ($q) => $q->where('user_id', $user->id)->latest()->with(['productOrder.items', 'attachedProductOrder.items'])])
             ->latest()
-            ->first();
+            ->get();
+
+        // ->latest() alone returns whichever row was created most recently.
+        // After a subscription is transferred IN, that recipient may still
+        // have an older stale row of their own — an abandoned 'pending'
+        // checkout, or an 'expired' one — that is newer than the handed-over
+        // subscription and would hide it. Always surface a still-usable
+        // active subscription first.
+        //
+        // A freshly-created subscription sits at status='pending' until
+        // payment is verified (synchronously via verify-payment, or async via
+        // the webhook) — it is NOT yet 'active'. If this account also has an
+        // older row that's 'active' but exhausted/expired (status never
+        // auto-flips, see scopeUsable), that stale row would otherwise win
+        // the next tier below and mask the subscription the student just
+        // paid for — including on the payment-callback screen, which relies
+        // on this endpoint returning "the one being paid for". So a pending
+        // row must outrank a merely-active-but-unusable one, and only a
+        // truly exhausted/expired active row (no pending in flight) falls
+        // through to the last two tiers.
+        $subscriber = $subscribers->first(fn ($s) => $s->status === 'active'
+                && (float) $s->remaining_kg > 0
+                && (is_null($s->ends_at) || $s->ends_at->isFuture()))
+            ?? $subscribers->firstWhere('status', 'pending')
+            ?? $subscribers->firstWhere('status', 'active')
+            ?? $subscribers->first();
 
         // response()->json(null) does NOT produce a JSON `null` body — Symfony's
         // JsonResponse constructor coerces a null payload to an empty
@@ -242,12 +306,28 @@ class SubscriberController extends Controller
         }
 
         $validated = $request->validate([
-            'customer_id' => ['required', 'string', 'exists:subscribers,customer_id'],
+            // Every account carries a customer_id from signup now, so the
+            // recipient can be any user — they do NOT need to have subscribed
+            // before (that was the old "invalid id" bug: it only looked in
+            // the subscribers table). Legacy subscriber codes still resolve.
+            'customer_id' => [
+                'required', 'string',
+                function ($attribute, $value, $fail) {
+                    $known = \App\Models\User::where('customer_id', $value)->exists()
+                        || Subscriber::where('customer_id', $value)->exists();
+
+                    if (! $known) {
+                        $fail('No account was found with that Customer ID.');
+                    }
+                },
+            ],
+            'pending_refill' => ['sometimes', Rule::in(['terminate', 'carry'])],
         ]);
 
-        $recipientUserId = Subscriber::where('customer_id', $validated['customer_id'])->value('user_id');
+        $recipientUserId = \App\Models\User::where('customer_id', $validated['customer_id'])->value('id')
+            ?: Subscriber::where('customer_id', $validated['customer_id'])->value('user_id');
 
-        if ($recipientUserId === $user->id) {
+        if ((int) $recipientUserId === (int) $user->id) {
             throw ValidationException::withMessages([
                 'customer_id' => ["You can't transfer a subscription to yourself."],
             ]);
@@ -259,11 +339,7 @@ class SubscriberController extends Controller
         // 'expired'. Only block the transfer if the recipient's
         // subscription is genuinely still usable: active, kg remaining, and
         // not past its end date.
-        $recipientHasActive = Subscriber::where('user_id', $recipientUserId)
-            ->where('status', 'active')
-            ->where('remaining_kg', '>', 0)
-            ->where(fn ($q) => $q->whereNull('ends_at')->orWhere('ends_at', '>=', now()))
-            ->exists();
+        $recipientHasActive = Subscriber::where('user_id', $recipientUserId)->usable()->exists();
         if ($recipientHasActive) {
             throw ValidationException::withMessages([
                 'customer_id' => ['This customer already has an active subscription.'],
@@ -272,8 +348,55 @@ class SubscriberController extends Controller
 
         $recipient = \App\Models\User::findOrFail($recipientUserId);
 
+        // Handle a still-pending refill the sender hasn't received yet.
+        $pendingRefill = $subscriber->refills()->where('status', 'pending')->latest()->first();
+        if ($pendingRefill) {
+            if (($validated['pending_refill'] ?? 'terminate') === 'carry') {
+                // Sender keeps it: reserve its kg out of the pool now so it
+                // isn't deducted again on delivery, snapshot the sender as
+                // the recipient (the subscriber's own recipient_* is about
+                // to point at the new owner), and advance it to 'approved'
+                // so the admin still fulfils it.
+                $subscriber->decrement('remaining_kg', min(
+                    (float) ($pendingRefill->kg_requested ?? 0),
+                    (float) $subscriber->remaining_kg
+                ));
+
+                $pendingRefill->update([
+                    'status' => 'approved',
+                    'recipient_name' => $user->name,
+                    'recipient_phone' => $user->phone,
+                    'kg_prereserved' => true,
+                ]);
+            } else {
+                // Detach any cart (bundled or attached) that was only riding
+                // on this now-cancelled refill so it isn't stranded on a dead
+                // trip. A paid one goes back to 'approved' (re-attachable
+                // elsewhere); an unpaid bundle stays 'pending' for the
+                // subscriber to deal with.
+                foreach ([['product_order_id', $pendingRefill->productOrder], ['attached_product_order_id', $pendingRefill->attachedProductOrder]] as [$column, $cart]) {
+                    if (! $cart) {
+                        continue;
+                    }
+                    if ($cart->status !== 'pending') {
+                        $cart->update(['status' => 'approved']);
+                    }
+                    $pendingRefill->update([$column => null]);
+                }
+                $pendingRefill->update(['status' => 'cancelled']);
+            }
+
+            $subscriber->refresh();
+        }
+
         $subscriber->update([
             'user_id' => $recipientUserId,
+            // The recipient's OWN permanent code, not the sender's — a
+            // transfer moves ownership of the subscription, not the
+            // sender's identity. The sender keeps their real code for their
+            // next subscription (see store()); refill history stays split
+            // by requester regardless (see Refill::user_id).
+            'customer_id' => $recipient->customer_id,
             'recipient_name' => $recipient->name,
             'recipient_phone' => $recipient->phone,
             'recipient_address' => $recipient->hostel,

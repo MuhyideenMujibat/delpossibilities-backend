@@ -17,6 +17,10 @@ class User extends Authenticatable
     /** @use HasFactory<UserFactory> */
     use HasApiTokens, HasFactory, Notifiable;
 
+    // Flat percentage knocked off the gas cost of an order when the student
+    // has a referral coupon to spend (see referral_discount_available).
+    public const REFERRAL_DISCOUNT_PERCENT = 10;
+
     /**
      * The attributes that are mass assignable.
      *
@@ -35,7 +39,7 @@ class User extends Authenticatable
         'email_verified_at',
         'referred_by_user_id',
         'referral_reward_granted',
-        'referral_credit_balance',
+        'referral_discount_available',
     ];
 
     protected $appends = [
@@ -67,8 +71,32 @@ class User extends Authenticatable
             'password' => 'hashed',
             'loyalty_progress_kg' => 'decimal:2',
             'referral_reward_granted' => 'boolean',
-            'referral_credit_balance' => 'decimal:2',
+            'referral_discount_available' => 'integer',
         ];
+    }
+
+    protected static function booted(): void
+    {
+        // Every account gets a shareable customer/referral code the moment
+        // it's created — no longer tied to subscribing (see Subscriber, which
+        // now reuses this code instead of minting its own). It's just the
+        // account's own id, zero-padded, scoped by signup year:
+        // DEL-2026-0042. Set on `created`, not `creating`, because the id
+        // isn't assigned until the row is inserted.
+        static::created(function (User $user) {
+            if (blank($user->customer_id)) {
+                $user->forceFill([
+                    'customer_id' => static::customerIdFor($user),
+                ])->saveQuietly();
+            }
+        });
+    }
+
+    public static function customerIdFor(User $user): string
+    {
+        $year = $user->created_at?->year ?? now()->year;
+
+        return 'DEL-'.$year.'-'.str_pad((string) $user->id, 4, '0', STR_PAD_LEFT);
     }
 
     public function orders()
@@ -96,25 +124,25 @@ class User extends Authenticatable
         return $this->belongsTo(User::class, 'referred_by_user_id');
     }
 
-    // Called from the two paths that count as a "qualifying purchase" for
-    // referral purposes — Order/PaystackWebhookController's paid-order
-    // side effects, and Subscriber::activate(). A standalone Eazy Market
-    // purchase never calls this. The referral_reward_granted flag (checked
-    // here, not "is this their first order") is what makes this safely
-    // idempotent regardless of which of the two trigger points fires first.
-    public function grantReferralRewardIfEligible(): void
+    // Called from the paid-gas-order side effects (OrderController::verify and
+    // PaystackWebhookController). This is the SECOND referrer coupon — the
+    // first was granted at registration (AuthController). Gives the person who
+    // referred this student a 10%-off coupon, but only for a real gas order of
+    // 3 kg or more, and only once per referred student (the
+    // referral_reward_granted flag on the referred user, checked here, keeps
+    // it idempotent across both trigger points and any retries). Subscriptions
+    // and Eazy Market orders don't count.
+    public function grantReferralRewardIfEligible(float $orderKg = 0): void
     {
         if (! $this->referred_by_user_id || $this->referral_reward_granted) {
             return;
         }
 
-        $amount = (float) (Setting::current()->referral_reward_amount ?? 0);
-
-        if ($amount <= 0) {
+        if ($orderKg < 3) {
             return;
         }
 
-        static::where('id', $this->referred_by_user_id)->increment('referral_credit_balance', $amount);
+        static::where('id', $this->referred_by_user_id)->increment('referral_discount_available');
         $this->update(['referral_reward_granted' => true]);
     }
 

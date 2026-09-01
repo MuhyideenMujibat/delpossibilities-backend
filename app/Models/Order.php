@@ -23,6 +23,7 @@ class Order extends Model
         'loyalty_discount_amount',
         'delivery_fee',
         'referral_credit_applied',
+        'referral_discount_amount',
         'product_order_id',
         'attached_product_order_id',
         'total_amount',
@@ -42,6 +43,7 @@ class Order extends Model
             'loyalty_discount_applied' => 'boolean',
             'loyalty_discount_amount' => 'decimal:2',
             'referral_credit_applied' => 'decimal:2',
+            'referral_discount_amount' => 'decimal:2',
         ];
     }
 

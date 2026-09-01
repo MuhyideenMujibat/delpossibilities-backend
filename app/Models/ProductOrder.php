@@ -59,21 +59,29 @@ class ProductOrder extends Model
 
     // The subscriber refill this cart is riding along with, if any
     // (subscriber path — refill is free, this cart is still paid for on
-    // its own, but the two are fulfilled/tracked together).
+    // its own, but the two are fulfilled/tracked together). Split like
+    // order()/attachingOrder(): refill() is the cart built from the refill
+    // request, attachingRefill() is one attached after being paid standalone.
     public function refill()
     {
         return $this->hasOne(Refill::class);
     }
 
-    // True once this cart has been bundled into either a gas order or a
-    // subscriber refill — status then follows whichever it's attached to
-    // (see OrderController::updateStatus / RefillController::update)
+    public function attachingRefill()
+    {
+        return $this->hasOne(Refill::class, 'attached_product_order_id');
+    }
+
+    // True once this cart has been bundled into / attached to a gas order
+    // or a subscriber refill — status then follows whichever it's attached
+    // to (see OrderController::updateStatus / RefillController::update)
     // rather than being editable on its own.
     public function isLinked(): bool
     {
         return $this->order()->exists()
             || $this->attachingOrder()->exists()
-            || $this->refill()->exists();
+            || $this->refill()->exists()
+            || $this->attachingRefill()->exists();
     }
 
     // eazy_market items pay a delivery fee tiered purely by their own

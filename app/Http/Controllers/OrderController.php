@@ -25,7 +25,6 @@ class OrderController extends Controller
             'delivery_zone_id' => ['nullable', 'required_if:location_type,off_campus', 'integer', 'exists:delivery_zones,id'],
             'product_order_id' => ['nullable', 'integer', 'exists:product_orders,id'],
             'attached_product_order_id' => ['nullable', 'integer', 'different:product_order_id', 'exists:product_orders,id'],
-            'use_referral_credit' => ['sometimes', 'boolean'],
         ]);
 
         $user = $request->user();
@@ -76,16 +75,18 @@ class OrderController extends Controller
             ? (float) $deliveryZone->fee
             : ($setting->delivery_fee ?? 0);
 
-        // Referral credit — earned by referring other students who go on
-        // to pay for a gas order or subscription (see
-        // User::grantReferralRewardIfEligible) — can offset this order's
-        // delivery fee, up to whichever is smaller: the fee itself, or the
-        // student's available balance. Applied and decremented in the same
-        // request; there's no separate confirmation step since this isn't
-        // itself a charge, just a discount.
-        $referralCreditApplied = 0;
-        if ($request->boolean('use_referral_credit') && (float) $user->referral_credit_balance > 0) {
-            $referralCreditApplied = min($deliveryFee, (float) $user->referral_credit_balance);
+        // Referral discount — a flat 10% off this order's gas cost, spending
+        // one of the student's coupons (earned by registering with a code, or
+        // by referring someone who then pays for a 3 kg+ gas order — see
+        // User::grantReferralRewardIfEligible). Its own line item, like
+        // loyalty; auto-applied whenever a coupon is available, decremented
+        // on order creation.
+        $referralDiscountAmount = 0.0;
+        if ((int) $user->referral_discount_available > 0) {
+            $referralDiscountAmount = round(
+                (float) $validated['kg'] * (float) $pricePerKg * (\App\Models\User::REFERRAL_DISCOUNT_PERCENT / 100),
+                2
+            );
         }
 
         // An Eazy Market / Gas Services cart (see ProductOrderController) can
@@ -178,11 +179,13 @@ class OrderController extends Controller
             'loyalty_discount_applied' => $loyaltyDiscountApplied,
             'loyalty_discount_amount' => $loyaltyDiscountAmount,
             'delivery_fee' => $deliveryFee,
-            'referral_credit_applied' => $referralCreditApplied,
+            'referral_credit_applied' => 0,
+            'referral_discount_amount' => $referralDiscountAmount,
             'product_order_id' => $productOrder?->id,
             'attached_product_order_id' => $attachedProductOrder?->id,
             'total_amount' => round(
-                $validated['kg'] * $pricePerKg - ($loyaltyDiscountAmount ?? 0) + $deliveryFee - $referralCreditApplied + $productOrderTotal, 2
+                max($validated['kg'] * $pricePerKg - ($loyaltyDiscountAmount ?? 0) - $referralDiscountAmount, 0)
+                + $deliveryFee + $productOrderTotal, 2
             ),
             'hostel_address' => $validated['hostel_address'],
             'location_type' => $validated['location_type'],
@@ -190,8 +193,8 @@ class OrderController extends Controller
             'status' => 'pending',
         ]);
 
-        if ($referralCreditApplied > 0) {
-            $user->decrement('referral_credit_balance', $referralCreditApplied);
+        if ($referralDiscountAmount > 0) {
+            $user->decrement('referral_discount_available');
         }
 
         return response()->json($order, 201);
@@ -210,7 +213,7 @@ class OrderController extends Controller
     public function index()
     {
         return response()->json(
-            Order::with('user')->latest()->get()
+            Order::with(['user', 'productOrder.items', 'attachedProductOrder.items'])->latest()->get()
         );
     }
 
@@ -350,7 +353,7 @@ class OrderController extends Controller
                 $order->productOrder->update(['status' => 'approved', 'paid_at' => $order->paid_at]);
             }
 
-            $order->user->grantReferralRewardIfEligible();
+            $order->user->grantReferralRewardIfEligible((float) $order->kg);
         } elseif ($paystackStatus === 'success') {
             // Paid, but not the right amount — don't silently approve it.
             Log::warning('Paystack verify amount mismatch', [
