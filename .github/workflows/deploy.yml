@@ -111,6 +111,7 @@ jobs:
             rm -f bootstrap/cache/packages.php bootstrap/cache/services.php
             php -d memory_limit=512M artisan package:discover --ansi
             php -d memory_limit=512M artisan config:clear
+            php -d memory_limit=512M artisan cache:clear
             php -d memory_limit=512M artisan route:clear
             php -d memory_limit=512M artisan config:cache
             php -d memory_limit=512M artisan migrate --force
