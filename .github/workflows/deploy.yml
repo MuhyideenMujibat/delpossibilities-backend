@@ -105,6 +105,10 @@ jobs:
             # vendor/ is built and shipped by the CI runner (composer.phar kept getting
             # deleted on this host mid-install, most likely by CPGuard's malware scanner
             # flagging the self-extracting phar), so composer never runs on the server.
+            # bootstrap/cache/*.php is excluded from sync, so a stale packages.php can
+            # reference dev-only providers (e.g. Pail) missing from the --no-dev vendor
+            # we just shipped; clear it before Artisan boots and tries to load them.
+            rm -f bootstrap/cache/packages.php bootstrap/cache/services.php
             php -d memory_limit=512M artisan package:discover --ansi
             php -d memory_limit=512M artisan config:clear
             php -d memory_limit=512M artisan route:clear
