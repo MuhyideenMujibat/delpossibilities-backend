@@ -16,8 +16,11 @@ jobs:
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.2'
+          php-version: '8.5'
           tools: composer
+
+      - name: Install PHP dependencies
+        run: composer install --no-dev --optimize-autoloader --no-interaction --prefer-dist --no-scripts
 
       - name: Set up SSH key
         run: |
@@ -31,7 +34,6 @@ jobs:
             --exclude='.git' \
             --exclude='.github' \
             --exclude='node_modules' \
-            --exclude='vendor' \
             --exclude='tests' \
             --exclude='public' \
             --exclude='.env' \
@@ -100,24 +102,10 @@ jobs:
           port: ${{ secrets.SSH_PORT || 22 }}
           script: |
             cd ${{ secrets.APP_PATH }}
-            # Shared hosting defaults PHP CLI to a 128M memory_limit, which isn't enough
-            # for composer's package:discover hook and has silently SIGKILL'd deploys
-            # before (exit 137, no PHP error since the OS killed it, not PHP itself).
-            mkdir -p ~/.phprc_override
-            printf "memory_limit = 512M\n" > ~/.phprc_override/php.ini
-            export PHPRC=~/.phprc_override
-            export COMPOSER_MEMORY_LIMIT=-1
-            if ! command -v composer >/dev/null 2>&1; then
-              if [ ! -f composer.phar ]; then
-                curl -sSL -o composer-setup.php https://getcomposer.org/installer
-                php -d allow_url_fopen=1 composer-setup.php --quiet
-                rm -f composer-setup.php
-              fi
-              COMPOSER="php composer.phar"
-            else
-              COMPOSER="composer"
-            fi
-            $COMPOSER install --no-dev --optimize-autoloader --no-interaction --prefer-dist
+            # vendor/ is built and shipped by the CI runner (composer.phar kept getting
+            # deleted on this host mid-install, most likely by CPGuard's malware scanner
+            # flagging the self-extracting phar), so composer never runs on the server.
+            php -d memory_limit=512M artisan package:discover --ansi
             php -d memory_limit=512M artisan config:clear
             php -d memory_limit=512M artisan route:clear
             php -d memory_limit=512M artisan config:cache
