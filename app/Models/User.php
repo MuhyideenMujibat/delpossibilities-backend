@@ -17,8 +17,10 @@ class User extends Authenticatable
     /** @use HasFactory<UserFactory> */
     use HasApiTokens, HasFactory, Notifiable;
 
-    // Flat percentage knocked off the gas cost of an order when the student
-    // has a referral coupon to spend (see referral_discount_available).
+    // Default percentage knocked off the gas cost of an order when the
+    // student has a referral coupon to spend (see referral_discount_available)
+    // — used only when the admin hasn't set Setting::referral_discount_percent
+    // (see Setting::referralDiscountPercent).
     public const REFERRAL_DISCOUNT_PERCENT = 10;
 
     /**
@@ -125,9 +127,9 @@ class User extends Authenticatable
     }
 
     // Called from the paid-gas-order side effects (OrderController::verify and
-    // PaystackWebhookController). This is the SECOND referrer coupon — the
-    // first was granted at registration (AuthController). Gives the person who
-    // referred this student a 10%-off coupon, but only for a real gas order of
+    // PaystackWebhookController). Gives the person who referred this student
+    // a coupon (percentage set by Setting::referral_discount_percent, see
+    // Setting::referralDiscountPercent), but only for a real gas order of
     // 3 kg or more, and only once per referred student (the
     // referral_reward_granted flag on the referred user, checked here, keeps
     // it idempotent across both trigger points and any retries). Subscriptions

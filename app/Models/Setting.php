@@ -28,7 +28,7 @@ class Setting extends Model
         'session_ends_at',
         'semester_starts_at',
         'semester_ends_at',
-        'referral_reward_amount',
+        'referral_discount_percent',
         'investment_bank_name',
         'investment_account_name',
         'investment_account_number',
@@ -54,7 +54,7 @@ class Setting extends Model
             'session_ends_at' => 'date',
             'semester_starts_at' => 'date',
             'semester_ends_at' => 'date',
-            'referral_reward_amount' => 'decimal:2',
+            'referral_discount_percent' => 'decimal:2',
             'investment_monthly_rate_percent' => 'decimal:2',
             'investment_minimum_amount' => 'decimal:2',
         ];
@@ -85,5 +85,12 @@ class Setting extends Model
         return (bool) $this->loyalty_enabled
             && (float) $this->loyalty_threshold_kg > 0
             && (float) $this->loyalty_discount_percent > 0;
+    }
+
+    // Falls back to the referral coupon's built-in default when the admin
+    // hasn't set one, so referrals keep working out of the box.
+    public function referralDiscountPercent(): float
+    {
+        return (float) ($this->referral_discount_percent ?? User::REFERRAL_DISCOUNT_PERCENT);
     }
 }

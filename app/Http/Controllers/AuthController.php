@@ -123,14 +123,11 @@ class AuthController extends Controller
 
         $pending->delete();
 
-        // Both referral coupons go to the REFERRER. One lands here, the
-        // moment someone registers with their code; the second comes later,
-        // once that student pays for a gas order of 3 kg+ (see
-        // User::grantReferralRewardIfEligible). The student who used the code
-        // gets no discount themselves.
-        if ($referrerUserId) {
-            User::where('id', $referrerUserId)->increment('referral_discount_available');
-        }
+        // The referrer's coupon is granted only once — later, when this
+        // student pays for a gas order of 3 kg+ (see
+        // User::grantReferralRewardIfEligible). Nothing to do here at
+        // registration; the student who used the code gets no discount
+        // themselves.
 
         $token = $user->createToken('auth_token')->plainTextToken;
 

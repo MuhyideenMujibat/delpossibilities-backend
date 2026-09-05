@@ -75,16 +75,17 @@ class OrderController extends Controller
             ? (float) $deliveryZone->fee
             : ($setting->delivery_fee ?? 0);
 
-        // Referral discount — a flat 10% off this order's gas cost, spending
-        // one of the student's coupons (earned by registering with a code, or
-        // by referring someone who then pays for a 3 kg+ gas order — see
-        // User::grantReferralRewardIfEligible). Its own line item, like
-        // loyalty; auto-applied whenever a coupon is available, decremented
-        // on order creation.
+        // Referral discount — an admin-configurable flat percentage off this
+        // order's gas cost (Setting::referral_discount_percent, see
+        // AdminSettings' Referral Rewards section), spending one of the
+        // student's coupons. Earned only by referring someone who then pays
+        // for a 3 kg+ gas order (see User::grantReferralRewardIfEligible).
+        // Its own line item, like loyalty; auto-applied whenever a coupon is
+        // available, decremented on order creation.
         $referralDiscountAmount = 0.0;
         if ((int) $user->referral_discount_available > 0) {
             $referralDiscountAmount = round(
-                (float) $validated['kg'] * (float) $pricePerKg * (\App\Models\User::REFERRAL_DISCOUNT_PERCENT / 100),
+                (float) $validated['kg'] * (float) $pricePerKg * ($setting->referralDiscountPercent() / 100),
                 2
             );
         }
